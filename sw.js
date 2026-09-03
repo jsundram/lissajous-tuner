@@ -30,7 +30,7 @@
 // Get one wrong and the failure is a blank white screen offline, a lost offline copy, or a stale
 // one that never updates. The seven review rounds behind this design: #7.
 
-const V = "lt-v1";     // <-- BUMP ON EVERY SHELL CHANGE (rename the stem freely; keep the digits)
+const V = "lt-v2";     // <-- BUMP ON EVERY SHELL CHANGE (rename the stem freely; keep the digits)
 
 // "app-v" — the stem shared by every cache generation. app.js's VER_PREFIX must match it, and the
 // NUMERIC TAIL is load-bearing: it orders generations for the collect below and for checkVer()'s
@@ -46,7 +46,11 @@ function verNum(name) {
 
 const SHELL = [
   "./", "./index.html", "./styles.css",
-  "./app.js", "./theme.js", "./manifest.json",
+  "./app.js", "./theme.js", "./strings.js", "./manifest.json",
+  // Fetched by addModule() well after boot. It MUST be precached — a worklet is a normal
+  // same-origin request, and missing it offline breaks the app in a way that looks exactly
+  // like a DSP bug — but it is deliberately NOT in BOOT_DEPS (see there).
+  "./tuner-worklet.js",
   "./assets/icon.svg", "./assets/icon-180.png", "./assets/icon-192.png", "./assets/icon-512.png",
   // ...add every file the app needs offline: more pages, data JSON, self-hosted fonts.
 ];

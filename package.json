@@ -1,0 +1,13 @@
+{
+  "name": "lissajous-tuner",
+  "private": true,
+  "description": "The site itself is static and has no dependencies — this file exists only to name the test harnesses.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs && node scripts/sw.test.mjs",
+    "test:dsp": "node --test tests/*.test.mjs",
+    "test:sw": "node scripts/sw.test.mjs",
+    "lint:sw": "python3 scripts/sw-lint.py",
+    "figure": "node scripts/make-figure.mjs && ./scripts/make-icons.sh && ./scripts/make-og.sh"
+  }
+}
