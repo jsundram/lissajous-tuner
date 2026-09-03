@@ -125,8 +125,10 @@ a{ color:var(--accent) }
 .chip.flat span{ color:var(--flat) }
 
 /* ---- build id: always visible, never dev-gated -------------------------------------- */
+.statusrow{ flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:0 2px; min-height:16px }
+.dev-slot{ flex:0 0 auto; display:flex; gap:6px }
 .buildid{
-  flex:0 0 auto; text-align:right; padding:0 2px;
+  margin-left:auto; text-align:right;
   font:500 9px/1 ui-monospace, monospace; color:var(--muted); opacity:.6;
 }
 
@@ -160,16 +162,25 @@ a{ color:var(--accent) }
 .dev-stats div{ background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:6px 8px }
 .dev-stats b{ display:block; font:700 14px/1.2 ui-monospace, monospace; font-variant-numeric:tabular-nums }
 .dev-stats small{ color:var(--muted); font-size:10px }
+/* Loopback sweep results. Tabular numerals so the level column reads as a column. */
+.dev-sweep:empty{ display:none }
+.dev-sweep table{ width:100%; border-collapse:collapse; font:500 11px/1.4 ui-monospace, monospace; font-variant-numeric:tabular-nums }
+.dev-sweep th{ text-align:left; color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); padding:3px 4px }
+.dev-sweep td{ padding:3px 4px; border-bottom:1px solid var(--line) }
+.dev-sweep tr.bad td{ color:var(--sharp) }
+.dev-sweep tr.bad b{ font-weight:700 }
+
 .dev-actions{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px }
 .dev-actions button{
   appearance:none; border:1px solid var(--line); background:var(--bg); color:var(--ink);
   border-radius:999px; padding:8px 12px; font:600 12px/1 system-ui, sans-serif; cursor:pointer; min-height:36px;
 }
+/* Lives in the status row, NOT pinned over the chips — see .statusrow. */
 .dev-toggle{
-  position:fixed; left:calc(8px + env(safe-area-inset-left)); bottom:calc(6px + env(safe-area-inset-bottom));
-  z-index:31; appearance:none; border:1px solid var(--line); background:var(--card); color:var(--muted);
-  border-radius:999px; padding:6px 10px; font:600 11px/1 ui-monospace, monospace; cursor:pointer;
+  appearance:none; border:1px solid var(--line); background:var(--card); color:var(--muted);
+  border-radius:999px; padding:3px 8px; font:600 9px/1.2 ui-monospace, monospace; cursor:pointer;
 }
+.dev-toggle[aria-expanded="true"]{ border-color:var(--accent); color:var(--accent) }
 
 /* Target REAL touch devices — not just a narrow desktop window — when you want fixed phone sizing
    or a tap fallback for hover-only UI (tooltips!). A bare max-width also catches a shrunk desktop. */

@@ -100,10 +100,14 @@
     </div>
   </div>
 
-  <!-- Build id, ALWAYS visible (not dev-gated): a bug report is worthless without it. It sits in
-       the normal flow rather than pinned to a corner — pinned, it collided with the last chip on a
-       375px-wide phone, and an unreadable build id is the same as no build id. -->
-  <div class="buildid" id="buildid" title="build"></div>
+  <!-- Status row. Everything in it sits in the NORMAL FLOW rather than pinned to a corner: pinned,
+       the build id collided with the last chip on a 375px phone and the dev pill sat on top of the
+       first one — and now that the chips are buttons that play reference tones, an overlay there
+       swallows taps meant for a control. -->
+  <div class="statusrow">
+    <span class="dev-slot" id="dev-slot"></span>
+    <span class="buildid" id="buildid" title="build"></span>
+  </div>
 
   <!-- The quartet-useful view: the whole instrument's state at a glance after one pass across
        the strings. -->

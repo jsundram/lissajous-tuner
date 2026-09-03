@@ -189,7 +189,7 @@ function paintEstimate(m) {
   // While a reference tone sounds, the microphone is hearing OUR tone. The tuner would lock that
   // string and report ~0.0 cents, which is indistinguishable from a perfectly tuned instrument —
   // the most dangerous thing this app could show. Freeze and say what is actually happening.
-  if (ref >= 0) {
+  if (ref >= 0 && !devMode) {
     fig.frozen = true;
     const stage = document.querySelector(".stage");
     stage.classList.add("gated");
@@ -244,6 +244,15 @@ function paintEstimate(m) {
       lastByString[m.s] = m.c;
     }
   }
+  // Dev mode deliberately does NOT suppress the reading while a reference tone sounds — that is
+  // the whole point of the loopback test: speaker -> room -> mic -> DSP is the one path the
+  // headless suite cannot exercise, and it is the path that produced the open-G misdetection. The
+  // label is unmistakable so this can never be read as a measurement of an instrument.
+  if (ref >= 0) {
+    dirEl.textContent = "loopback · " + Tuner.stringNames()[ref];
+    centsEl.classList.remove("sharp", "flat");
+  }
+
   // A lone "MEASURED" under nothing reads as a bug; hide the caption with its value.
   for (const id of ["target-hz", "measured-hz"]) {
     const v = el(id);
@@ -483,8 +492,11 @@ function requestShellTopUp(){
 // SEPARATE groups on purpose: a taste knob cannot produce a wrong reading, a measurement knob can,
 // and putting them in one list invites the second to be treated like the first.
 let devStatsTimer = null;
+let devMode = false;         // true once the panel exists, however it was opened
+let sweepRows = null;        // last loopback sweep, included in Copy diagnostics
 
 function buildDevPanel() {
+  devMode = true;
   const panel = el("dev");
   panel.hidden = false;
   // Build it, but open it CLOSED. The panel is fixed to the bottom of the viewport, so leaving it
@@ -501,7 +513,7 @@ function buildDevPanel() {
     panel.style.display = open ? "" : "none";
     toggle.setAttribute("aria-expanded", String(open));
   };
-  document.body.appendChild(toggle);
+  el("dev-slot").appendChild(toggle);
 
   // Live measurements. This is what turns the one unverifiable constant in the plan into a minimum
   // on a curve you can see: sweep the bandwidth against a sustained real note and take the lowest
@@ -543,14 +555,21 @@ function buildDevPanel() {
     }
   }
 
+  const sweep = document.createElement("div");
+  sweep.id = "dev-sweep-out";
+  sweep.className = "dev-sweep";
+  panel.appendChild(sweep);
+
   const actions = document.createElement("div");
   actions.className = "dev-actions";
   actions.innerHTML = `
+    <button type="button" id="dev-sweep">Loopback sweep</button>
     <button type="button" id="dev-copy">Copy diagnostics</button>
     <button type="button" id="dev-js">Copy as JS</button>
     <button type="button" id="dev-rec">Record 15 s</button>
     <button type="button" id="dev-reset">Reset params</button>`;
   panel.appendChild(actions);
+  el("dev-sweep").onclick = sweepStrings;
 
   el("dev-copy").onclick = () => copyText(diagnostics(), el("dev-copy"), "Copy diagnostics");
   el("dev-js").onclick = () => copyText(paramsAsJs(), el("dev-js"), "Copy as JS");
@@ -641,6 +660,17 @@ function diagnostics() {
     "params       " + JSON.stringify(Tuner.params),
     "non-default  " + JSON.stringify(changedParams()),
   ];
+  if (sweepRows) {
+    lines.push("loopback     play -> hear | cents | jitter | lock | level(dB rel)");
+    const peak = Math.max(...sweepRows.map((r) => r.level), 1e-9);
+    for (const r of sweepRows) {
+      lines.push("             " + r.played + " -> " + r.heard + (r.ok ? "" : "  << MISMATCH")
+        + " | " + (r.cents === null ? "-" : fmtCents(r.cents))
+        + " | " + (r.jitter === null ? "-" : r.jitter.toFixed(3))
+        + " | " + r.lockedPct + "%"
+        + " | " + (20 * Math.log10(Math.max(r.level, 1e-9) / peak)).toFixed(1));
+    }
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -668,6 +698,95 @@ function copyText(text, button, label) {
       done(ok);
     } catch (e) { done(false); }
   }
+}
+
+// ---- loopback sweep ----------------------------------------------------------------
+// Play each string's reference tone through the speaker and report what the microphone and the DSP
+// made of it. This exercises speaker -> room -> mic -> detector on the real device, which is the
+// only way to see the thing that actually broke: a phone mic rolls off steeply low down, so a
+// violin G fundamental arrives far weaker than an E, and the detector has to survive that.
+//
+// It is a real acoustic measurement, so it is affected by room, volume and how you hold the phone.
+// Read `level` as a RELATIVE figure across the four rows, not an absolute one.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function sampleFor(ms) {
+  return new Promise((res) => {
+    const out = [];
+    const prev = Tuner.engine.onEstimate;
+    Tuner.engine.onEstimate = (m) => { prev(m); out.push({ s: m.s, c: m.c, st: m.st, a: m.a, n: m.n }); };
+    setTimeout(() => { Tuner.engine.onEstimate = prev; res(out); }, ms);
+  });
+}
+
+function summarizeSweep(names, i, hz, samples) {
+  const votes = {};
+  const cs = [];
+  let level = 0, input = 0, locked = 0;
+  for (const m of samples) {
+    level += m.a || 0; input += m.n || 0;
+    if (m.st === 1) {
+      locked++;
+      votes[m.s] = (votes[m.s] || 0) + 1;
+      if (m.c !== null) cs.push(m.c);
+    }
+  }
+  const heard = Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0];
+  cs.sort((a, b) => a - b);
+  const mean = cs.length ? cs.reduce((a, b) => a + b, 0) / cs.length : 0;
+  const n = samples.length || 1;
+  return {
+    played: names[i], playedIdx: i, hz: hz,
+    heard: heard === undefined ? "—" : names[heard],
+    ok: heard !== undefined && Number(heard) === i,
+    cents: cs.length ? cs[cs.length >> 1] : null,
+    jitter: cs.length > 1 ? Math.sqrt(cs.reduce((a, b) => a + (b - mean) * (b - mean), 0) / cs.length) : null,
+    lockedPct: Math.round((100 * locked) / n),
+    level: level / n,
+    input: input / n,
+  };
+}
+
+async function sweepStrings() {
+  const btn = el("dev-sweep");
+  if (!Tuner.engine.running) {
+    btn.textContent = "start listening first";
+    setTimeout(() => { btn.textContent = "Loopback sweep"; }, 1600);
+    return;
+  }
+  const names = Tuner.stringNames();
+  const targets = Tuner.targets();
+  const rows = [];
+  for (let i = 0; i < names.length; i++) {
+    btn.textContent = "Sweeping… " + names[i];
+    await Tuner.playReference(i);
+    await wait(700);                    // let the cascade and the LSQ window fill
+    rows.push(summarizeSweep(names, i, targets[i], await sampleFor(1400)));
+    Tuner.stopReference();
+    await wait(250);                    // and let it fall silent before the next
+  }
+  sweepRows = rows;
+  onReferenceChange();
+  renderSweep(rows);
+  btn.textContent = "Loopback sweep";
+}
+
+function renderSweep(rows) {
+  const out = el("dev-sweep-out");
+  if (!out) return;
+  const peak = Math.max(...rows.map((r) => r.level), 1e-9);
+  out.innerHTML = `<h3>Loopback <em>— speaker to mic, on this device</em></h3>
+    <table><thead><tr><th>play</th><th>hear</th><th>cents</th><th>jit</th><th>lock</th><th>level</th></tr></thead>
+    <tbody>${rows.map((r) => `<tr class="${r.ok ? "" : "bad"}">
+      <td>${r.played}</td><td>${r.ok ? r.heard : "<b>" + r.heard + "</b>"}</td>
+      <td>${r.cents === null ? "–" : fmtCents(r.cents)}</td>
+      <td>${r.jitter === null ? "–" : r.jitter.toFixed(2)}</td>
+      <td>${r.lockedPct}%</td>
+      <td>${(20 * Math.log10(Math.max(r.level, 1e-9) / peak)).toFixed(0)} dB</td>
+    </tr>`).join("")}</tbody></table>
+    <div class="help">${Tuner.FLAGS.test
+      ? "<b>?test=1 is on, so this measured the synthetic oscillator, not the microphone.</b> Every row will mismatch. Reload without ?test=1 for a real loopback."
+      : "level is relative to the loudest row — that column is the microphone's response across the strings. A mismatch in <b>hear</b> is a detection failure worth reporting."}</div>`;
 }
 
 // Record raw PCM, then hand back a .f32 plus a sidecar JSON. A recording of a real bowed cello C2

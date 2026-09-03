@@ -77,7 +77,9 @@ the app doubles as a pitch pipe. While a reference tone sounds the readout shows
 rather than a number, because the microphone is hearing the app's own tone.
 
 Once installed to the home screen there is no URL bar, so **three taps on the build id** opens the
-dev panel.
+dev panel. Its **Loopback sweep** plays each string in turn and reports what the microphone and
+detector made of it — the `level` column is your phone's frequency response across the four
+strings, which is what makes a weak fundamental visible rather than merely suspected.
 
 ### Regenerating art
 

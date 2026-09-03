@@ -565,6 +565,13 @@ class TunerProcessor extends AudioWorkletProcessor {
       x: this.lastX,
       y: this.lastY,
       p: path,
+      // Absolute levels, for diagnostics only — nothing in the render uses them. `a` is the
+      // demodulated amplitude at the locked string (i.e. how much energy is actually in that
+      // string's band) and `n` is the raw input RMS. The ratio between them across the four
+      // strings IS the microphone's frequency response, which is what makes a weak fundamental
+      // visible instead of merely suspected.
+      a: amp1,
+      n: this.inRms,
     }, [path.buffer]);
   }
 }

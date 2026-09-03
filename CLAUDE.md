@@ -42,6 +42,17 @@ bumps `V` and restamps `build.js` *in one commit*. That order is deliberate and 
 commits), but `build.js` is itself precached, so bumping `V` in the earlier commit tripped
 `sw-lint` on every deploy. Bump and stamp travel together.
 
+**Loopback sweep** (dev panel) plays each string's reference tone and reports what the mic + detector
+made of it — play/hear/cents/jitter/lock%/level. It is the only test that covers speaker → room →
+mic → detector, the path that produced the open-G misdetection, and its `level` column IS the
+microphone's response across the strings. Meaningless under `?test=1` (that measures the synthetic
+oscillator), and the panel says so. Dev mode deliberately stops suppressing the readout while a
+reference tone sounds, labelling it `loopback · <string>`; **non-dev must keep suppressing it**, or
+the app reports ~0.0 cents off its own tone and looks like a perfectly tuned instrument.
+
+Nothing may be `position: fixed` over the chips row — they are buttons now, and an overlay there
+swallows taps meant for a control. The dev pill lives in `.statusrow` for exactly this reason.
+
 **Three taps on the build id opens the dev panel.** An installed PWA has no URL bar, so `?dev=1`
 cannot be typed once it is on the home screen — which is exactly where it needs calibrating against
 a real instrument. `?dev=1` still works in a tab.
