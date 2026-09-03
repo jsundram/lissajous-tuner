@@ -30,7 +30,7 @@
 // Get one wrong and the failure is a blank white screen offline, a lost offline copy, or a stale
 // one that never updates. The seven review rounds behind this design: #7.
 
-const V = "lt-v5";     // <-- BUMP ON EVERY SHELL CHANGE (rename the stem freely; keep the digits)
+const V = "lt-v6";     // <-- BUMP ON EVERY SHELL CHANGE (rename the stem freely; keep the digits)
 
 // "app-v" — the stem shared by every cache generation. app.js's VER_PREFIX must match it, and the
 // NUMERIC TAIL is load-bearing: it orders generations for the collect below and for checkVer()'s
