@@ -1,0 +1,11 @@
+# Keep PII and machine junk out of the repo.
+# Any roster / contacts / phone-number data belongs in a private Google Sheet, pulled at runtime —
+# NEVER committed. A noindex page is still public to anyone with the URL.
+*roster*.json
+*private*
+.DS_Store
+node_modules/
+__pycache__/
+
+# Claude Code: track .claude/settings.json (team hooks), ignore the ephemeral working dir.
+.claude/.cc-writes/

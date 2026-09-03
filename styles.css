@@ -1,0 +1,65 @@
+/* Design system. Everything is a CSS custom property so a color mode is a variable swap, not a
+   second stylesheet. Light = the defaults; dark arrives two ways, keyed off <html data-theme> which
+   theme.js sets (and the pre-paint script in index.html stamps before first paint):
+     - @media (prefers-color-scheme: dark) :root:not([data-theme])  — 'auto': follow the OS
+     - :root[data-theme="dark"]                                     — forced (toggle / screenshots / regression)
+   A forced 'light' needs no block: it carries data-theme, so the :not([data-theme]) media rule skips
+   it and the light defaults win even when the OS is dark. Keep the two dark blocks in sync. */
+
+:root{
+  --bg:#f4f3ef; --card:#ffffff; --ink:#16211f; --muted:#5c6b68; --line:#dcdad3; --accent:#0f766e;
+  --trace:#0f766e;                     /* the figure itself — see --trace note in the dark blocks */
+  --sharp:#b45309; --flat:#1d4ed8;     /* error-sign tints, used by the cents readout */
+  --radius:12px; --maxw:640px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]){ --bg:#0e1413; --card:#161d1c; --ink:#e8efed; --muted:#8b9a97; --line:#26302e; --accent:#2ee6a8; --trace:#2ee6a8; --sharp:#fbbf24; --flat:#7dd3fc; }
+}
+:root[data-theme="dark"]{ --bg:#0e1413; --card:#161d1c; --ink:#e8efed; --muted:#8b9a97; --line:#26302e; --accent:#2ee6a8; --trace:#2ee6a8; --sharp:#fbbf24; --flat:#7dd3fc; }
+
+*{ box-sizing:border-box; margin:0; padding:0 }
+html{ -webkit-text-size-adjust:100% }   /* stop iOS inflating text on rotate */
+
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:system-ui, -apple-system, "Segoe UI", sans-serif; line-height:1.45;
+  overscroll-behavior-y:none;             /* kill the rubber-band bounce in standalone */
+  /* safe-area padding: real gaps on notched phones, 0 elsewhere */
+  padding:calc(20px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+          calc(28px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+}
+main{ max-width:var(--maxw); margin:0 auto }   /* mobile-first: full-width phone, capped desktop */
+
+.head{ display:flex; align-items:baseline; gap:10px; margin-bottom:16px }
+h1{ font-size:clamp(24px, 6vw, 34px); letter-spacing:-.01em }
+
+.card{ background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px }
+a{ color:var(--accent) }
+
+/* The "you're on an old version — tap to update" tag (app.js). Neutral when current,
+   accented + tappable when the server is ahead. */
+.ver{ font:500 11px/1 ui-monospace, monospace; color:var(--muted) }
+.ver.behind{ color:var(--accent); text-decoration:underline; cursor:pointer }
+
+/* "cached · N min old" — shown by app.js when data came from the SWR fallback (offline). */
+.stale{ font:500 11px/1 ui-monospace, monospace; color:var(--accent) }
+
+/* Three-state theme toggle (auto/light/dark). Pushed to the right of the header. */
+.theme-toggle{
+  margin-left:auto; font:500 12px/1 system-ui, sans-serif; color:var(--muted);
+  background:transparent; border:1px solid var(--line); border-radius:999px;
+  padding:6px 12px; cursor:pointer; min-height:32px;   /* keep the tap target reasonable */
+}
+
+/* Target REAL touch devices — not just a narrow desktop window — when you want fixed phone sizing
+   or a tap fallback for hover-only UI (tooltips!). A bare max-width also catches a shrunk desktop. */
+@media (hover:none) and (pointer:coarse) and (max-width:800px){
+  /* phone-only overrides go here */
+}
+
+/* Print is its own pass. If this app is ever printed (or PDF'd), links aren't clickable on paper
+   and dark backgrounds waste ink — reset to white/black here. */
+@media print{
+  body{ background:#fff; color:#000; padding:0 }
+  .card{ border-color:#000 }
+}

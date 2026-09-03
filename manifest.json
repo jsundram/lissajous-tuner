@@ -1,0 +1,16 @@
+{
+  "name": "Lissajous Tuner",
+  "short_name": "Tuner",
+  "description": "A strobe-style tuner for violin, viola and cello that shows tuning error as a rotating figure instead of a needle.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1413",
+  "theme_color": "#0e1413",
+  "icons": [
+    { "src": "./assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./assets/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "./assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

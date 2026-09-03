@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Warn-only pre-commit guard. Enable once per clone:
+#   git config core.hooksPath .githooks
+# Never blocks a commit — it nags. CI (.github/workflows/checks.yml) runs the lint + tests with
+# real exit codes; the staged-diff checks (V bump, OG card size) only bite here.
+python3 scripts/sw-lint.py || true
+python3 scripts/og-lint.py || true
+
+# Behavioral tests: the offline / lie-fi fetch-handler contract. Skipped quietly if node is
+# absent (the toolchain is otherwise Python; node is only needed for these).
+if command -v node >/dev/null 2>&1; then
+  node scripts/sw.test.mjs >/dev/null 2>&1 || echo "  (warning only — sw tests failed; run 'node scripts/sw.test.mjs' to see why)"
+fi
+exit 0

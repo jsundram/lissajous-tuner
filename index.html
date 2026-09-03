@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+
+<!-- viewport-fit=cover pairs with the safe-area padding in styles.css to keep content clear of
+     the notch / home indicator when installed. Forgetting the viewport tag entirely is a classic
+     late fix — set it first. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">   <!-- no white flash before CSS in dark mode -->
+
+<!-- Browser-UI tint, one per scheme. Must match styles.css --bg. -->
+<meta name="theme-color" content="#f4f3ef" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1413" media="(prefers-color-scheme: dark)">
+
+<!-- Install polish. iOS reads these + apple-touch-icon and mostly ignores the manifest;
+     Android reads the manifest. Ship both. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tuner">
+<link rel="manifest" href="./manifest.json">
+
+<!-- Icons live in assets/. Run scripts/make-icons.sh to generate the PNGs from icon.svg. -->
+<link rel="icon" type="image/svg+xml" href="./assets/icon.svg">
+<link rel="icon" type="image/png" href="./assets/icon-192.png">
+<link rel="apple-touch-icon" href="./assets/icon-180.png">
+
+<title>Lissajous Tuner — phase-coherent tuning for bowed strings</title>
+<meta name="description" content="A strobe-style tuner for violin, viola and cello that shows tuning error as a rotating figure instead of a needle.">
+
+<!-- Link previews. og:image MUST be an ABSOLUTE https URL to a RASTER (PNG/JPG), 1200x630, and
+     kept reasonably small (compress it). iMessage/WhatsApp/Slack reject relative paths + SVG. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Lissajous Tuner">
+<meta property="og:title" content="Lissajous Tuner — phase-coherent tuning for bowed strings">
+<meta property="og:description" content="A strobe-style tuner for violin, viola and cello that shows tuning error as a rotating figure instead of a needle.">
+<meta property="og:url" content="https://jsundram.github.io/lissajous-tuner/">
+<meta property="og:image" content="https://jsundram.github.io/lissajous-tuner/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="A glowing green limaçon curve on a dark ground, above the words Lissajous Tuner.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Lissajous Tuner — phase-coherent tuning for bowed strings">
+<meta name="twitter:description" content="A strobe-style tuner for violin, viola and cello that shows tuning error as a rotating figure instead of a needle.">
+<meta name="twitter:image" content="https://jsundram.github.io/lissajous-tuner/assets/og.png">
+<link rel="canonical" href="https://jsundram.github.io/lissajous-tuner/">
+
+<!-- Pre-paint theme stamp. Reads the saved theme and sets data-theme on <html>
+     BEFORE styles.css resolves, so a forced light/dark choice doesn't flash.
+     Kept a dumb 3-liner on purpose — theme.js owns everything else; this must
+     use the SAME key ("lt-theme") + attribute values so the two never disagree. -->
+<script>
+  try{ var t = localStorage.getItem("lt-theme");
+       if(t==="light"||t==="dark") document.documentElement.setAttribute("data-theme", t); }catch(e){}
+</script>
+
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<main>
+  <section id="app" class="card">
+    <p>Skeleton. The tuner UI lands in step 4.</p>
+  </section>
+</main>
+
+<!-- Load order matters: theme.js exposes globals app.js uses. -->
+<script src="./theme.js"></script>
+<script src="./app.js"></script>
+
+<!-- GoatCounter (anonymous public stats). Cross-origin and async by design: deliberately NOT in
+     sw.js's SHELL, so it simply no-ops offline instead of holding up a load. Last tag on the page. -->
+<script data-goatcounter="https://lissajous.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

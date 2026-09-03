@@ -1,0 +1,34 @@
+name: checks
+
+# Guards for sw.js — the offline service worker. Its contract is subtle and easy to regress, so
+# both halves run on every push and PR with real exit codes:
+#   - node scripts/sw.test.mjs : behavioral tests of the fetch handler (cache-first, lie-fi
+#     bounds, offline fallbacks) against a mocked SW environment.
+#   - scripts/sw-lint.py       : the precache-contract checks (the pre-commit hook runs these
+#     warn-only; here they fail the build). NB its headline check — a staged SHELL file touched
+#     without a V bump — reads `git diff --cached`, which is empty in a CI checkout, so THAT check
+#     only bites locally in the hook; CI enforces the other four (missing/renamed entries,
+#     cross-origin entries, V's numeric tail, VER_PREFIX agreement). Base-vs-head V comparison
+#     would be a separate enhancement.
+#   - scripts/og-lint.py is NOT here for the same reason it can't be: it only inspects the staged
+#     OG card (`git diff --cached`), so in CI it has nothing to check. It stays a hook-only guard.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  sw:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: syntax-check sw.js
+        run: node --check sw.js
+      - name: behavioral tests (scripts/sw.test.mjs)
+        run: node scripts/sw.test.mjs
+      - name: precache lint (scripts/sw-lint.py)
+        run: python3 scripts/sw-lint.py
