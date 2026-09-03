@@ -1,13 +1,20 @@
 {
   "name": "lissajous-tuner",
   "private": true,
-  "description": "The site itself is static and has no dependencies — this file exists only to name the test harnesses.",
+  "description": "The site itself is static and has no runtime dependencies — this file exists only to name the test harnesses. Nothing here is deployed.",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.mjs && node scripts/sw.test.mjs",
+    "test": "node --test tests/*.test.mjs && node scripts/sw.test.mjs && python3 scripts/sw-lint.py",
     "test:dsp": "node --test tests/*.test.mjs",
     "test:sw": "node scripts/sw.test.mjs",
     "lint:sw": "python3 scripts/sw-lint.py",
-    "figure": "node scripts/make-figure.mjs && ./scripts/make-icons.sh && ./scripts/make-og.sh"
+    "serve": "python3 -m http.server 8137 --bind 127.0.0.1",
+    "check:browser": "node scripts/browser-check.mjs",
+    "check:offline": "node scripts/offline-check.mjs",
+    "figure": "node scripts/make-figure.mjs && ./scripts/make-icons.sh && ./scripts/make-og.sh",
+    "deploy": "./scripts/deploy.sh"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.56.1"
   }
 }

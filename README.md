@@ -45,11 +45,19 @@ it never needs `sampleRate` or any DSP constant.
 ## Development
 
 ```sh
-python3 -m http.server 8000        # any static server; getUserMedia needs localhost or HTTPS
-node --test tests/                 # headless DSP suite, no build step, no dependencies
-node scripts/sw.test.mjs           # service-worker fetch-handler contract
-python3 scripts/sw-lint.py         # precache contract (bump V when a SHELL file changes)
+npm run serve                 # static server on :8137 (getUserMedia needs localhost or HTTPS)
+npm test                      # DSP suite + service-worker suite + precache lint
+npm run check:browser         # real Chromium via ?test=1 — needs `npm install` and a server
+npm run check:offline         # prime the cache, go offline, confirm it still runs
 ```
+
+The DSP suite needs nothing installed. The two `check:` scripts drive a real browser, so they need
+`npm install` (a `playwright-core` devDependency; the browsers themselves come from
+`npx playwright install chromium`). Nothing in `node_modules` is ever deployed.
+
+**Deploy with `npm run deploy -- "message"`,** never by hand — it verifies, then bumps the
+service-worker cache generation and restamps the build id in one commit. Skipping it ships a fix
+that never reaches an installed phone.
 
 Enable the pre-commit guard once per clone:
 
