@@ -72,6 +72,13 @@ git config core.hooksPath .githooks
 | `?test=1&cents=3.93` | replace the mic with a synthetic tone at that error — no violin required |
 | `?dev=1` | parameter panel, jitter / lock-drop / gate-close readouts, record + replay |
 
+Tap any string chip to **hear its target pitch** — it works before granting microphone access, so
+the app doubles as a pitch pipe. While a reference tone sounds the readout shows a reference state
+rather than a number, because the microphone is hearing the app's own tone.
+
+Once installed to the home screen there is no URL bar, so **three taps on the build id** opens the
+dev panel.
+
 ### Regenerating art
 
 `assets/icon.svg` and `assets/og.svg` are **generated**, not hand-drawn — both come from the same

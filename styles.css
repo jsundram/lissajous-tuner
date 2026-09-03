@@ -62,7 +62,11 @@ a{ color:var(--accent) }
 
 /* Corner overlays sit ON the figure so it gets the whole square. pointer-events:none so they
    never eat a tap meant for the canvas. */
-.hud{ position:absolute; inset:0; pointer-events:none; font-variant-numeric:tabular-nums }
+.hud{
+  position:absolute; inset:0; pointer-events:none; font-variant-numeric:tabular-nums;
+  opacity:0; transition:opacity .2s ease;      /* empty labels before Start read as a broken screen */
+}
+.stage.live .hud{ opacity:1 }
 .hud > div{ position:absolute; display:flex; flex-direction:column; gap:2px }
 .hud small{ font:500 10px/1 system-ui, sans-serif; color:var(--muted); letter-spacing:.04em; text-transform:uppercase }
 .hud-tl{ top:0; left:0 }
@@ -80,7 +84,9 @@ a{ color:var(--accent) }
 /* Dimmed + frozen below the noise floor. A stale figure that still looks in tune is the main way
    this class of app lies to you, so the dimming has to be unmistakable. */
 .stage.gated #figure{ opacity:.28; transition:opacity .25s ease }
-.stage.gated .hud{ opacity:.45 }
+/* Scoped to .live: this rule has the same specificity as `.stage.live .hud` and comes later, so
+   unscoped it won this cascade and revealed the HUD before Start whenever the stage was gated. */
+.stage.live.gated .hud{ opacity:.45 }
 .stage.searching #cents{ color:var(--muted) }
 
 /* ---- start / error overlay --------------------------------------------------------- */
@@ -102,11 +108,17 @@ a{ color:var(--accent) }
 
 /* ---- per-string chips -------------------------------------------------------------- */
 .chips{ display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; flex:0 0 auto }
+/* Buttons: tapping a string plays its target pitch. 48px keeps it a real target on a phone. */
 .chip{
+  appearance:none; font:inherit; color:var(--ink); cursor:pointer;
   border:1px solid var(--line); border-radius:10px; padding:6px 4px; text-align:center;
-  background:var(--card); min-height:44px; display:flex; flex-direction:column; justify-content:center; gap:2px;
+  background:var(--card); min-height:48px; display:flex; flex-direction:column; justify-content:center; gap:2px;
+  -webkit-tap-highlight-color:transparent;
 }
+.chip:active{ transform:scale(.97) }
 .chip.active{ border-color:var(--accent) }
+.chip.playing{ border-color:var(--accent); background:color-mix(in srgb, var(--accent) 16%, var(--card)) }
+.chip.playing span{ color:var(--accent) }
 .chip b{ font:700 13px/1 system-ui, sans-serif }
 .chip span{ font:600 12px/1 ui-monospace, monospace; color:var(--muted); font-variant-numeric:tabular-nums }
 .chip.sharp span{ color:var(--sharp) }

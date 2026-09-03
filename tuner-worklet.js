@@ -34,6 +34,14 @@ const MSG_EVERY = 4;        // post every 4th quantum: 512 samples, ~10.7 ms, ~9
 // Unwrapping every 32 samples instead decouples the ceiling from the quantum: 250 Hz at 16k,
 // 750 Hz at 48k, past any real error at any rate the platform can give us.
 const UNWRAP_STRIDE = 32;
+
+// How many geometry points ride on each message. The estimate only needs one — I/Q are bandlimited
+// to the capture bandwidth, so decimating to ~94 Hz is legitimate for MEASUREMENT. But the figure
+// is a PATH, and at a 5 Hz beat 94 Hz gives ~18 points per revolution, which draws as a visible
+// polygon rather than a curve. The phasor is already evaluated every UNWRAP_STRIDE samples for the
+// unwrapper, so those points are free: sending all of them is 16x the path resolution for 128
+// bytes a message. The plan called the raggedness "acceptable"; it did not need to be.
+const PATH_PER_MSG = MSG_EVERY * (QUANTUM / UNWRAP_STRIDE);   // 16
 const LPF_SECTIONS = 4;     // ADDENDUM section 2 — a single pole is not enough (see CASCADE_SCALE)
 
 // Cascading N identical one-poles NARROWS the composite response: for N=4 the -3 dB point sits at
@@ -57,11 +65,28 @@ const DETECT_N_MIN = 1024, DETECT_N_MAX = 8192;
 // flat E5 two bins off its own fundamental, in a sidelobe, scoring near zero.
 //
 // Probing a band decouples them: bins stay narrow enough to separate C2 from G2, and the band
-// gives a flat capture far wider than +-100 cents. The bands cannot collide, which is the whole
-// reason this is safe: consecutive strings are a fifth apart = 702 cents, so any half-width below
-// 351 cents keeps every candidate's band disjoint from its neighbours'.
-const DETECT_BAND_CENTS = 300;
-const DETECT_PROBE_MAX = 48;       // per candidate; a ceiling on the per-block cost
+// gives a flat capture wider than the +-100 cents the plan asks for.
+//
+// A band cannot collide with a NEIGHBOUR'S BAND: consecutive strings are a fifth apart = 702
+// cents, so any half-width below 351 keeps them disjoint. But it can absolutely collide with a
+// neighbour's PARTIALS, and at +-300 cents it did: E5's band was 555-785 Hz, which contains G3's
+// 3rd and 4th partials (587 and 782 Hz). On a real violin the G string's fundamental is weak — the
+// body barely radiates 196 Hz and phone mics roll off there — so those partials beat it and an
+// open G read as E5. +-150 still covers +-100 and catches none of them.
+const DETECT_BAND_CENTS = 150;
+const DETECT_PROBE_MAX = 64;       // per harmonic bank; a ceiling on the per-block cost
+
+// ...and scoring the fundamental ALONE is what made that collision fatal. Score the harmonic
+// SERIES instead: sum the band peak at k*f0 for k = 1..detHarmonics, weighted 1/k. A string whose
+// fundamental the mic has rolled off still wins on its own partials, because every one of them
+// lands on one of ITS harmonics while only one or two land on anyone else's.
+//
+// This is the principled version of the 2*f0 term tried and rejected earlier. That one gave a
+// candidate credit for a SINGLE octave probe, which for fifth-spaced strings lands exactly on the
+// third partial of the string below (2*G2 = 3*C2). Requiring the whole series to line up removes
+// the degeneracy: a wrong candidate collects one or two partials, the right one collects all of
+// them.
+const DETECT_HARMONICS = 4;
 
 // Defaults. The main thread owns the authoritative copy of this table (tuner.js PARAMS, which is
 // what the ?dev=1 panel is generated from) and posts it as a `config` message at startup; these are
@@ -73,15 +98,12 @@ const DEFAULTS = {
   lsqSec: 0.5,              // least-squares slope window
   hystDb: 6, hystBlocks: 3, // a new string must beat the locked one by this much, this many times
   gateAmp: 0.0012,          // demodulated magnitude below which we refuse to report (noise floor)
-  // Weight of a 2*f0 probe in the DETECTION score. DEFAULT 0, and raise it only with a real cello
-  // in hand: consecutive strings are fifths, so G2 = 1.5*C2 means 2*G2 = 3*C2 EXACTLY — an octave
-  // probe on one string lands precisely on the third partial of the string below, which is the
-  // octave confusion the whole four-candidate design exists to avoid. It is here because phone mics
-  // roll off steeply below ~100 Hz and C2's fundamental can be weaker than its second partial; if
-  // that turns out to break C2 detection on a real instrument, this is the knob, and the lock will
-  // need watching. Tracking (as opposed to detection) already has an octave path that is safe: the
-  // 2*f0 phasor blend below.
-  detH2Weight: 0,
+  detHarmonics: DETECT_HARMONICS,   // harmonics summed per candidate (see above)
+  // Raw input RMS above which a closed gate means "I hear something I cannot attribute to a
+  // string" (st 3) rather than "silence" (st 0). A string more than ~150 cents off falls outside
+  // every candidate's detection band, so whatever we lock will see nothing through its narrow
+  // demodulator — and reporting "listening" there is misleading when the player is bowing hard.
+  unattributedRms: 0.02,
   outOfRangeCents: 120,     // beyond this: st 3, and NO cents value (ADDENDUM section 3)
   h2EnterCents: 20,         // use the 2*f0 phasor as the primary estimate inside this...
   h2ExitCents: 25,          // ...and fall back outside this (hysteresis, so it cannot chatter)
@@ -236,6 +258,10 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.useH2 = false;
     this.quantum = 0;
     this.rec = null; this.recFill = 0;       // dev-only raw PCM capture (see onMessage "record")
+    this.inRms = 0;                          // smoothed RMS of the RAW input (see unattributedRms)
+    this.path = new Float32Array(2 * PATH_PER_MSG);   // interleaved x,y since the last message
+    this.pathN = 0;
+    this.lastCents = null;
     this.lastX = 0; this.lastY = 0; this.lastTh = 0; this.lastR = 0;
 
     this.sizeDetector();
@@ -291,27 +317,35 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.buildProbes();
   }
 
-  // Precompute each candidate's probe bank: Goertzel coefficients across +-DETECT_BAND_CENTS,
-  // spaced at half a bin so the band's response has no dips between probes. Spacing is derived
-  // from the bin width rather than fixed in cents, so a high string (whose band spans many bins)
-  // gets more probes than a low one (whose band is barely wider than a single bin).
+  // Precompute each candidate's probe banks: one band of Goertzel coefficients per harmonic,
+  // spanning +-DETECT_BAND_CENTS and spaced at half a bin so the band's response has no dips
+  // between probes. Spacing derives from the bin width rather than being fixed in cents, so a high
+  // harmonic (whose band spans many bins) gets more probes than a low one.
+  //
+  // A mistuned string shifts EVERY harmonic by the same ratio, so the band is the same width in
+  // cents at every k — which is what lets the series still line up on a flat string.
   buildProbes() {
     const res = this.rate / this.detN;              // Hz per bin
     const lo = Math.pow(2, -DETECT_BAND_CENTS / 1200), hi = Math.pow(2, DETECT_BAND_CENTS / 1200);
     const coefOf = (f) => 2 * Math.cos((2 * Math.PI * f) / this.rate);
+    const K = Math.max(1, Math.round(this.cfg.detHarmonics));
+    const nyq = this.rate * 0.5;
+
     this.probes = this.targets.map((f0) => {
-      const span = f0 * (hi - lo);
-      const n = Math.max(3, Math.min(DETECT_PROBE_MAX, Math.ceil(span / (0.5 * res)) + 1));
-      const bank = new Float64Array(n);
-      for (let k = 0; k < n; k++) {
-        const frac = n === 1 ? 0.5 : k / (n - 1);
-        bank[k] = coefOf(f0 * (lo + (hi - lo) * frac));
+      const banks = [];
+      for (let k = 1; k <= K; k++) {
+        // Drop a harmonic whose band would run past Nyquist — aliased bins score noise.
+        if (f0 * k * hi >= nyq) break;
+        const span = f0 * k * (hi - lo);
+        const n = Math.max(3, Math.min(DETECT_PROBE_MAX, Math.ceil(span / (0.5 * res)) + 1));
+        const bank = new Float64Array(n);
+        for (let j = 0; j < n; j++) {
+          bank[j] = coefOf(f0 * k * (lo + ((hi - lo) * j) / (n - 1)));
+        }
+        banks.push({ w: 1 / k, bank: bank });        // 1/k: a partial matters less the higher it is
       }
-      return bank;
+      return banks;
     });
-    // The optional 2*f0 probe (see detH2Weight) is a single bin, not a band: it exists only to
-    // notice a fundamental the mic rolled off, and widening it would overlap the neighbour above.
-    this.probesH2 = this.targets.map((f0) => coefOf(Math.min(2 * f0, this.rate * 0.49)));
   }
 
   // Point the demodulators at the locked string. bw2 = 2*bw1 so the 2*f0 demodulator has the same
@@ -342,16 +376,19 @@ class TunerProcessor extends AudioWorkletProcessor {
   // loses the string entirely.
   runDetection() {
     const n = this.detN, buf = this.detBuf;
-    const w2 = this.cfg.detH2Weight;
     let best = -1, bestScore = 0, lockedScore = 0;
     for (let c = 0; c < this.targets.length; c++) {
-      const bank = this.probes[c];
-      let peak = 0;                                  // best power anywhere in this string's band
-      for (let k = 0; k < bank.length; k++) {
-        const pw = goertzelPower(buf, n, bank[k]);
-        if (pw > peak) peak = pw;
+      const banks = this.probes[c];
+      let score = 0;
+      for (let h = 0; h < banks.length; h++) {
+        const bank = banks[h].bank;
+        let peak = 0;                                // best power anywhere in THIS harmonic's band
+        for (let j = 0; j < bank.length; j++) {
+          const pw = goertzelPower(buf, n, bank[j]);
+          if (pw > peak) peak = pw;
+        }
+        score += banks[h].w * peak;                  // sum the series, weighted 1/k
       }
-      const score = w2 ? peak + w2 * goertzelPower(buf, n, this.probesH2[c]) : peak;
       if (score > bestScore) { bestScore = score; best = c; }
       if (c === this.locked) lockedScore = score;
     }
@@ -382,6 +419,18 @@ class TunerProcessor extends AudioWorkletProcessor {
     const block = input && input[0];
     const len = block ? block.length : QUANTUM;
 
+    // Raw input level, independent of any lock. Used only to tell "silence" apart from "loud, but
+    // not attributable to any string" — a string more than DETECT_BAND_CENTS off falls outside
+    // every band, so whatever we lock hears nothing and the gate closes. Reporting "listening"
+    // while the player is bowing hard is the wrong answer.
+    if (block) {
+      let sum = 0;
+      for (let n = 0; n < len; n++) sum += block[n] * block[n];
+      this.inRms += 0.2 * (Math.sqrt(sum / len) - this.inRms);
+    } else {
+      this.inRms *= 0.8;
+    }
+
     if (this.rec && block) {
       const room = Math.min(len, this.rec.length - this.recFill);
       if (room > 0) { this.rec.set(block.subarray(0, room), this.recFill); this.recFill += room; }
@@ -397,6 +446,16 @@ class TunerProcessor extends AudioWorkletProcessor {
     }
 
     // --- demodulate and estimate, in UNWRAP_STRIDE chunks (see UNWRAP_STRIDE) ---
+    // The amplitude follower and the plotted geometry are updated in here too, once per chunk, so
+    // the path carries every phasor sample rather than one in sixteen (see PATH_PER_MSG).
+    const cfg = this.cfg;
+    const aAtt = 1 - Math.exp(-1 / Math.max(1, cfg.attackSec * this.unwrapPerSec));
+    const aRel = 1 - Math.exp(-1 / Math.max(1, cfg.releaseSec * this.unwrapPerSec));
+    // Drop the 2*f0 overlay at large error: past ~25 cents that phasor undersamples and only adds
+    // visual noise. Uses the previous message's cents, which moves far slower than a quantum.
+    const ow = (this.lastCents !== null && Math.abs(this.lastCents) <= cfg.overlayGateCents)
+      ? cfg.overlayWeight : 0;
+
     let th1 = 0;
     for (let off = 0; off < len; off += UNWRAP_STRIDE) {
       const n = Math.min(UNWRAP_STRIDE, len - off);
@@ -406,6 +465,18 @@ class TunerProcessor extends AudioWorkletProcessor {
         th1 = Math.atan2(this.d1.Q, this.d1.I);
         this.s1.push(this.u1.push(th1));
         this.s2.push(this.u2.push(Math.atan2(this.d2.Q, this.d2.I)));
+
+        const a1 = this.d1.mag;
+        this.env += (a1 > this.env ? aAtt : aRel) * (a1 - this.env);
+        // Normalizing by the follower (not the instantaneous amplitude) is what holds the radius
+        // steady across bow pressure. The guard is load-bearing: env is exactly 0 on the first
+        // chunks and during silence, and an unguarded divide puts NaN into the render.
+        const env = this.env > 1e-9 ? this.env : 1e-9;
+        if (this.pathN < PATH_PER_MSG) {
+          this.path[this.pathN * 2] = (this.d1.I + ow * this.d2.I) / env;
+          this.path[this.pathN * 2 + 1] = (this.d1.Q + ow * this.d2.Q) / env;
+          this.pathN++;
+        }
       } else {
         this.s1.push(this.u1.push(0));      // keep the windows fed so nothing goes stale or NaN
         this.s2.push(this.u2.push(0));
@@ -414,12 +485,6 @@ class TunerProcessor extends AudioWorkletProcessor {
 
     const amp1 = this.locked >= 0 ? this.d1.mag : 0;
     const amp2 = this.locked >= 0 ? this.d2.mag : 0;
-
-    // Amplitude follower: fast attack, slow release, so the figure holds a stable radius as the
-    // note decays instead of collapsing toward the centre and reading as "in tune".
-    const aAtt = 1 - Math.exp(-1 / Math.max(1, this.cfg.attackSec * this.quantaPerSec));
-    const aRel = 1 - Math.exp(-1 / Math.max(1, this.cfg.releaseSec * this.quantaPerSec));
-    this.env += (amp1 > this.env ? aAtt : aRel) * (amp1 - this.env);
 
     this.quantum++;
     if (this.quantum % MSG_EVERY === 0) this.emit(amp1, amp2, th1);
@@ -432,8 +497,11 @@ class TunerProcessor extends AudioWorkletProcessor {
     let st, cents = null;
 
     if (this.locked < 0) st = 2;                       // searching
-    else if (gated) st = 0;                            // below the noise floor
-    else st = 1;
+    else if (gated) {
+      // Gate closed. Two very different reasons, and they must not look the same to the player:
+      // nothing to hear, versus something loud that no string's detection band explains.
+      st = this.inRms > cfg.unattributedRms ? 3 : 0;
+    } else st = 1;
 
     let f0 = this.locked >= 0 ? this.targets[this.locked] : 0;
 
@@ -468,21 +536,25 @@ class TunerProcessor extends AudioWorkletProcessor {
     }
 
     // --- render-ready geometry -------------------------------------------------
-    // Normalizing by the follower (not by the instantaneous amplitude) is what keeps the radius
-    // stable across bow pressure. The guard is load-bearing: env is exactly 0 on the first quanta
-    // and during silence, and an unguarded divide puts NaN into the render.
+    // The path was filled per UNWRAP_STRIDE chunk in process(); here it is just handed over.
     const env = this.env > 1e-9 ? this.env : 1e-9;
+    if (this.pathN > 0) {
+      this.lastX = this.path[(this.pathN - 1) * 2];
+      this.lastY = this.path[(this.pathN - 1) * 2 + 1];
+    }
     if (st === 1 || st === 3) {
-      // Drop the 2*f0 overlay when the error is large: past ~25 cents that phasor undersamples at
-      // the message rate and only adds visual noise.
-      const w = (cents !== null && Math.abs(cents) <= cfg.overlayGateCents) ? cfg.overlayWeight : 0;
-      this.lastX = (this.d1.I + w * this.d2.I) / env;
-      this.lastY = (this.d1.Q + w * this.d2.Q) / env;
       this.lastTh = th1;
       this.lastR = Math.min(4, amp1 / env);
     }
-    // st 0 and 2 deliberately hold the previous geometry: the main thread freezes and dims the
-    // figure. A stale figure that still looks in tune is the main way this class of app lies.
+
+    // st 0 and 2 send an EMPTY path: the main thread freezes and dims the figure, holding exactly
+    // what it last drew. A stale figure that still looks in tune is the main way this class of app
+    // lies, so a freeze must not quietly keep extending the curve.
+    const path = (st === 1 || st === 3)
+      ? this.path.slice(0, this.pathN * 2)
+      : new Float32Array(0);
+    this.pathN = 0;
+    this.lastCents = cents;
 
     this.port.postMessage({
       s: this.locked,
@@ -492,7 +564,8 @@ class TunerProcessor extends AudioWorkletProcessor {
       st,
       x: this.lastX,
       y: this.lastY,
-    });
+      p: path,
+    }, [path.buffer]);
   }
 }
 

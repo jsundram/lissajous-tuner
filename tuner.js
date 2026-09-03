@@ -54,9 +54,12 @@
     hystBlocks:     { def: 3,    min: 1,     max: 10,    step: 1,     cls: "measure", worklet: true,
                       label: "Lock hysteresis", unit: "blocks",
                       help: "...and for this many consecutive blocks. Bow noise on attack can briefly beat the score; this is the mitigation." },
-    detH2Weight:    { def: 0,    min: 0,     max: 1,     step: 0.05,  cls: "measure", worklet: true,
-                      label: "Octave probe weight", unit: "x",
-                      help: "DANGEROUS above 0. Strings are fifths, so 2*G2 = 3*C2 exactly: an octave probe lands on the third partial of the string below. Only for a cello whose fundamental the mic has rolled off." },
+    detHarmonics:   { def: 4,    min: 1,     max: 6,     step: 1,     cls: "measure", worklet: true,
+                      label: "Harmonics scored", unit: "k",
+                      help: "Each candidate is scored by summing the band peak at k*f0, weighted 1/k. At 1 it scores the fundamental alone, which mislabels a violin open G — its fundamental is weak and other strings' bands catch its partials." },
+    unattributedRms:{ def: 0.02, min: 0.002, max: 0.1,   step: 0.002, cls: "measure", worklet: true,
+                      label: "Unattributed threshold", unit: "rms",
+                      help: "Raw input level above which a closed gate reports \u201cout of range\u201d rather than \u201clistening\u201d. A string more than ~150 cents off falls outside every detection band, so it must not read as silence." },
     outOfRangeCents:{ def: 120,  min: 50,    max: 300,   step: 10,    cls: "measure", worklet: true,
                       label: "Refuse to report past", unit: "cents",
                       help: "Past 100 cents the detection band means we may be locked to the wrong string, so a number is unjustifiable." },
@@ -219,6 +222,7 @@
 
   async function stop() {
     engine.running = false;
+    stopReference();
     releaseWakeLock();
     if (engine.stream) { engine.stream.getTracks().forEach((t) => t.stop()); engine.stream = null; }
     if (engine.ctx) { try { await engine.ctx.close(); } catch (e) { /* already closed */ } engine.ctx = null; }
@@ -274,6 +278,8 @@
     engine.settings[key] = value;
     save(SETTINGS_KEY, engine.settings);
     pushTargets();                       // a real change resets the lock; an identical list doesn't
+    // A sounding reference is now at the wrong pitch (or on a string this instrument lacks).
+    if (engine.ref) { const i = engine.ref.index; stopReference(); playReference(i); }
   }
   function setParam(key, value) {
     engine.params[key] = value;
@@ -285,6 +291,72 @@
     save(VIZ_KEY, engine.params);
     pushConfig();
   }
+
+  // ---- reference tone -------------------------------------------------------------
+  // Tap a string to hear its target pitch. Two things make this more than a convenience:
+  //
+  //  - It works WITHOUT the microphone. The context is created on the tap (itself a user gesture),
+  //    so the app is a usable pitch pipe even if mic permission is denied or never granted.
+  //  - While it sounds, the mic hears OUR tone. The tuner would dutifully lock the played string
+  //    and report ~0.0 cents, which looks exactly like a perfectly tuned instrument. That is the
+  //    single most dangerous thing this app could display, so `referencePlaying` is exported and
+  //    the readout shows a reference state instead of a number.
+  //
+  // A bare sine is nearly inaudible from a phone speaker at G3 (196 Hz) — small drivers roll off
+  // hard — so the tone carries two partials. That also makes it easier to match by ear.
+  const REF_PARTIALS = [1, 0.25, 0.12];
+  const REF_GAIN = 0.18;
+  const REF_MAX_SEC = 20;        // it stops itself; a reference tone left droning is its own bug
+
+  async function playReference(index) {
+    const t = targets();
+    if (index < 0 || index >= t.length) return;
+    stopReference();
+    if (!engine.ctx) engine.ctx = new (root.AudioContext || root.webkitAudioContext)();
+    const ctx = engine.ctx;
+    await ctx.resume();
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(REF_GAIN, ctx.currentTime + 0.03);   // no click on attack
+    gain.connect(ctx.destination);
+
+    const oscs = REF_PARTIALS.map((a, k) => {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.value = t[index] * (k + 1);
+      const g = ctx.createGain();
+      g.gain.value = a;
+      o.connect(g).connect(gain);
+      o.start();
+      return o;
+    });
+
+    engine.ref = {
+      index: index, oscs: oscs, gain: gain,
+      timer: setTimeout(() => { stopReference(); if (engine.onReference) engine.onReference(-1); }, REF_MAX_SEC * 1000),
+    };
+    if (engine.onReference) engine.onReference(index);
+  }
+
+  function stopReference() {
+    const r = engine.ref;
+    if (!r) return;
+    engine.ref = null;
+    clearTimeout(r.timer);
+    const ctx = engine.ctx;
+    try {
+      r.gain.gain.cancelScheduledValues(ctx.currentTime);
+      r.gain.gain.setValueAtTime(r.gain.gain.value, ctx.currentTime);
+      r.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.08);      // no click on release
+    } catch (e) { /* context already closed */ }
+    setTimeout(() => {
+      r.oscs.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) {} });
+      try { r.gain.disconnect(); } catch (e) {}
+    }, 150);
+  }
+
+  function referencePlaying() { return engine.ref ? engine.ref.index : -1; }
 
   // ---- dev: record and replay ---------------------------------------------------
   // Do NOT adjust parameters live while bowing: that conflates the parameter change with the bow
@@ -318,6 +390,7 @@
   root.Tuner = {
     PARAMS, FLAGS, engine, defaults,
     start, stop, targets, stringNames, jitter, record, stopRecording, replay,
+    playReference, stopReference, referencePlaying,
     setSetting, setParam, resetParams, pushTargets, pushConfig,
     get settings() { return engine.settings; },
     get params() { return engine.params; },

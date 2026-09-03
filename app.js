@@ -38,11 +38,31 @@ const lastByString = {};
 // Points are captured in the ESTIMATE handler, not in the rAF loop: sampling the latest estimate
 // once per frame would drop a third of a 94 Hz stream and duplicate others, which shows up as an
 // unevenly-spaced figure. Every estimate lands on the curve exactly once.
+const TRAIL_CAP = 6000;      // ring capacity: ~4 s at 16 points x ~94 messages/s
+const TRAIL_CHUNKS = 28;     // constant-alpha polylines per frame (see drawFrame)
+const TRAIL_FLOOR = 0.02;    // drop a point once it is this faint — invisible, and unbounded otherwise
+
 const fig = {
   canvas: null, ctx: null, w: 0, h: 0, dpr: 1,
-  pts: [],                   // {x, y, c, t} in worklet coords + capture time
+  // A ring buffer of plain typed arrays rather than an array of {x,y,c,t} objects: at ~1500 points
+  // a second, allocating an object per point is real garbage on the render path.
+  bx: new Float32Array(TRAIL_CAP), by: new Float32Array(TRAIL_CAP),
+  bc: new Float32Array(TRAIL_CAP), bt: new Float64Array(TRAIL_CAP),
+  head: 0, count: 0,
   running: false, frozen: false,
 };
+
+// Oldest-first position i -> ring index.
+const ringIdx = (i) => (fig.head - fig.count + i + TRAIL_CAP * 2) % TRAIL_CAP;
+
+function trailPush(x, y, c, t) {
+  fig.bx[fig.head] = x; fig.by[fig.head] = y;
+  fig.bc[fig.head] = c === null || c === undefined ? NaN : c;
+  fig.bt[fig.head] = t;
+  fig.head = (fig.head + 1) % TRAIL_CAP;
+  if (fig.count < TRAIL_CAP) fig.count++;
+}
+function trailClear() { fig.head = 0; fig.count = 0; }
 
 // The knob is a per-frame alpha, so convert it to a per-second decay constant at a nominal 60 fps.
 // Keeping the knob in the plan's units means a value calibrated on one device still means the same
@@ -51,7 +71,6 @@ function decayPerSec() {
   const a = Math.min(0.5, Math.max(0.001, Tuner.params.trailAlpha));
   return -60 * Math.log(1 - a);
 }
-const TRAIL_FLOOR = 0.02;    // drop a point once it is this faint — invisible, and unbounded growth otherwise
 
 function resizeFigure() {
   const c = fig.canvas;
@@ -76,22 +95,34 @@ function clearFigure() {
 // Colour the trace by error sign when asked. Deliberately a TASTE knob: it cannot change the
 // number, only how fast you read its sign — which the direction of rotation already tells you.
 function traceColor(cents) {
-  if (!Tuner.params.hueByError || cents === null || cents === undefined || Math.abs(cents) < 1.0) {
+  if (!Tuner.params.hueByError || cents === null || Number.isNaN(cents) || Math.abs(cents) < 1.0) {
     return Theme.getCssColor("--trace") || "#2ee6a8";
   }
   return Theme.getCssColor(cents > 0 ? "--sharp" : "--flat") || "#2ee6a8";
 }
 
-// Called once per estimate (~94 Hz), NOT per frame.
+// Called once per estimate (~94 Hz). Each message carries the whole sub-quantum path since the
+// last one (16 points), not a single sample — that is what stops the figure drawing as a polygon
+// at large errors, where the beat is fast enough that 94 Hz gives under 20 points per revolution.
 function pushPoint(m) {
   // Gated or searching: stop capturing. The existing points stay, so the figure freezes exactly as
   // it was rather than decaying away — a decaying figure would erase the evidence of what the last
   // real reading looked like, and a frozen one that still looks in tune is why the dimming exists.
   if (m.st === 0 || m.st === 2) { fig.frozen = true; return; }
   fig.frozen = false;
-  fig.pts.push({ x: m.x, y: m.y, c: m.c, t: performance.now() });
-  const cutoff = performance.now() - (-Math.log(TRAIL_FLOOR) / decayPerSec()) * 1000;
-  while (fig.pts.length && fig.pts[0].t < cutoff) fig.pts.shift();
+  const t = performance.now();
+  const path = m.p;
+  if (path && path.length >= 2) {
+    // Spread the points across the message interval so the decay ramps smoothly rather than in
+    // 16-point steps. dt is tiny (~0.7 ms) but the arithmetic is free.
+    const n = path.length / 2;
+    const dt = 1000 / (Tuner.engine.ctx ? Tuner.engine.ctx.sampleRate / 128 / 4 : 94) / n;
+    for (let i = 0; i < n; i++) {
+      trailPush(path[i * 2], path[i * 2 + 1], m.c, t - (n - 1 - i) * dt);
+    }
+  } else {
+    trailPush(m.x, m.y, m.c, t);
+  }
 }
 
 function drawFrame() {
@@ -99,7 +130,7 @@ function drawFrame() {
   if (fig.frozen) return;              // hold the last painted frame, untouched
   const ctx = fig.ctx;
   clearFigure();
-  if (fig.pts.length < 2) return;
+  if (fig.count < 2) return;
 
   const cx = fig.w / 2, cy = fig.h / 2;
   const R = Math.min(fig.w, fig.h) * 0.36;
@@ -107,24 +138,39 @@ function drawFrame() {
   const cos = Math.cos(rot), sin = Math.sin(rot);
   const k = decayPerSec();
   const now = performance.now();
+  const maxAge = (-Math.log(TRAIL_FLOOR) / k) * 1000;
+
+  let first = 0;
+  while (first < fig.count && now - fig.bt[ringIdx(first)] > maxAge) first++;
+  const live = fig.count - first;
+  if (live < 2) return;
 
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.lineWidth = Tuner.params.strokeWidth * fig.dpr;
 
   // y is negated: the worklet works in maths orientation, the canvas in screen orientation.
-  const px = (p) => cx + R * (p.x * cos - p.y * sin);
-  const py = (p) => cy - R * (p.x * sin + p.y * cos);
+  const sx = (j) => cx + R * (fig.bx[j] * cos - fig.by[j] * sin);
+  const sy = (j) => cy - R * (fig.bx[j] * sin + fig.by[j] * cos);
 
-  for (let i = 1; i < fig.pts.length; i++) {
-    const p = fig.pts[i];
-    const a = Math.exp(-k * (now - p.t) / 1000);
-    if (a < TRAIL_FLOOR) continue;
-    ctx.globalAlpha = a;
-    ctx.strokeStyle = traceColor(p.c);
+  // Stroke the trail as TRAIL_CHUNKS constant-alpha polylines rather than one path per segment.
+  // With ~3200 live points a per-segment stroke would be 3200 draw calls a frame; this is 28, and
+  // a 28-step alpha ramp is indistinguishable from a continuous one at these opacities.
+  const chunks = Math.min(TRAIL_CHUNKS, live - 1);
+  const per = Math.ceil(live / chunks);
+  for (let c = 0; c < chunks; c++) {
+    const a0 = first + c * per;
+    const a1 = Math.min(fig.count, a0 + per + 1);    // +1 so consecutive chunks share a point
+    if (a1 - a0 < 2) continue;
+    const mid = ringIdx((a0 + a1) >> 1);
+    const alpha = Math.exp((-k * (now - fig.bt[mid])) / 1000);
+    if (alpha < TRAIL_FLOOR) continue;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = traceColor(fig.bc[mid]);
     ctx.beginPath();
-    ctx.moveTo(px(fig.pts[i - 1]), py(fig.pts[i - 1]));
-    ctx.lineTo(px(p), py(p));
+    let j = ringIdx(a0);
+    ctx.moveTo(sx(j), sy(j));
+    for (let i = a0 + 1; i < a1; i++) { j = ringIdx(i); ctx.lineTo(sx(j), sy(j)); }
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
@@ -139,6 +185,24 @@ function loop() {
 
 // ---- readouts ---------------------------------------------------------------
 function paintEstimate(m) {
+  const ref = Tuner.referencePlaying();
+  // While a reference tone sounds, the microphone is hearing OUR tone. The tuner would lock that
+  // string and report ~0.0 cents, which is indistinguishable from a perfectly tuned instrument —
+  // the most dangerous thing this app could show. Freeze and say what is actually happening.
+  if (ref >= 0) {
+    fig.frozen = true;
+    const stage = document.querySelector(".stage");
+    stage.classList.add("gated");
+    stage.classList.remove("searching");
+    el("string-name").textContent = Tuner.stringNames()[ref];
+    el("target-hz").textContent = fmtHz(Tuner.targets()[ref]) + " Hz";
+    el("measured-hz").textContent = "";
+    el("cents").textContent = "♪";
+    el("cents").classList.remove("sharp", "flat");
+    el("direction").textContent = "reference tone";
+    return;
+  }
+
   pushPoint(m);
   const stage = document.querySelector(".stage");
   stage.classList.toggle("gated", m.st === 0);
@@ -180,6 +244,12 @@ function paintEstimate(m) {
       lastByString[m.s] = m.c;
     }
   }
+  // A lone "MEASURED" under nothing reads as a bug; hide the caption with its value.
+  for (const id of ["target-hz", "measured-hz"]) {
+    const v = el(id);
+    const cap = v.parentNode.querySelector("small");
+    if (cap) cap.style.visibility = v.textContent ? "visible" : "hidden";
+  }
   paintChips(m.s);
 }
 
@@ -188,23 +258,45 @@ function paintChips(activeIdx) {
   const names = Tuner.stringNames();
   if (wrap.children.length !== names.length) {
     wrap.innerHTML = "";
-    names.forEach(() => {
-      const d = document.createElement("div");
-      d.className = "chip";
-      d.innerHTML = "<b></b><span></span>";
-      wrap.appendChild(d);
+    names.forEach((_, i) => {
+      // A button, not a div: tapping a string plays its target pitch, so it needs to be a real
+      // control — focusable, and a proper tap target on a phone.
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip";
+      b.innerHTML = "<b></b><span></span>";
+      b.onclick = () => toggleReference(i);
+      wrap.appendChild(b);
     });
   }
+  const playing = Tuner.referencePlaying();
   names.forEach((n, i) => {
     const chip = wrap.children[i];
     const c = lastByString[i];
     chip.classList.toggle("active", i === activeIdx);
+    chip.classList.toggle("playing", i === playing);
     chip.classList.remove("sharp", "flat");
     chip.children[0].textContent = n;
+    chip.title = "Play " + n + " (" + fmtHz(Tuner.targets()[i]) + " Hz)";
+    if (i === playing) { chip.children[1].textContent = "♪ playing"; return; }
     if (c === undefined) { chip.children[1].textContent = "–"; return; }
     chip.children[1].textContent = fmtCents(c);
     if (Math.abs(c) >= 0.5) chip.classList.add(c > 0 ? "sharp" : "flat");
   });
+}
+
+function toggleReference(i) {
+  if (Tuner.referencePlaying() === i) { Tuner.stopReference(); onReferenceChange(-1); }
+  else Tuner.playReference(i);   // async (it may have to create/resume the context) — the engine
+                                 // calls onReference when the tone is actually sounding.
+}
+
+// Fires when a reference tone starts, is stopped, or times out on its own. Repaints directly
+// because the estimate stream may not be running at all — the reference tone works before Start.
+function onReferenceChange() {
+  const last = Tuner.engine.lastEstimate;
+  paintChips(last ? last.s : -1);
+  paintEstimate(last || { s: -1, c: null, st: 2, x: 0, y: 0, th: 0, r: 0 });
 }
 
 // ---- controls ----------------------------------------------------------------
@@ -285,8 +377,9 @@ async function onStart() {
   try {
     await Tuner.start();
     el("overlay").hidden = true;
+    document.querySelector(".stage").classList.add("live");
     fig.running = true;
-    fig.pts.length = 0;
+    trailClear();
     clearFigure();
     requestAnimationFrame(loop);
   } catch (err) {
@@ -314,8 +407,9 @@ function paintBuildId(extra, onTap) {
   if (!b) return;
   const info = window.BUILD || { sha: "dev", v: "?" };
   b.textContent = info.sha + " · " + info.v + (extra || "");
-  b.style.pointerEvents = onTap ? "auto" : "none";
-  b.style.cursor = onTap ? "pointer" : "";
+  // Always tappable: wireDevGesture() listens here too, so this must not turn pointer events off.
+  b.style.pointerEvents = "auto";
+  b.style.cursor = onTap ? "pointer" : "default";
   b.onclick = onTap || null;
 }
 
@@ -613,6 +707,31 @@ function download(blob, name) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+// An installed PWA has NO URL BAR, so ?dev=1 cannot be typed once the app is on the home screen —
+// which is exactly where it needs calibrating against a real instrument. Three taps on the build id
+// opens the panel. Deliberately obscure (it must not be reachable by accident) but not hidden: the
+// build id is the one element always on screen, and it is already the thing you look at to report
+// a bug.
+function wireDevGesture() {
+  const b = el("buildid");
+  if (!b) return;
+  let taps = 0, timer = null;
+  b.style.pointerEvents = "auto";
+  b.addEventListener("click", () => {
+    taps++;
+    clearTimeout(timer);
+    timer = setTimeout(() => { taps = 0; }, 600);
+    if (taps < 3) return;
+    taps = 0;
+    if (!el("dev").hasChildNodes()) buildDevPanel();
+    const panel = el("dev");
+    panel.hidden = false;
+    panel.style.display = panel.style.display === "none" ? "" : "none";
+    const t = document.querySelector(".dev-toggle");
+    if (t) t.setAttribute("aria-expanded", String(panel.style.display !== "none"));
+  });
+}
+
 // ---- boot ------------------------------------------------------------------------
 function boot() {
   if ("serviceWorker" in navigator) {
@@ -635,6 +754,7 @@ function boot() {
   paintBuildId();
 
   Tuner.engine.onEstimate = paintEstimate;
+  Tuner.engine.onReference = onReferenceChange;
 
   if (Tuner.FLAGS.test) {
     // Self-test: no microphone involved, so say what is being asserted rather than asking for
@@ -644,6 +764,7 @@ function boot() {
       "Run self-test", "No microphone is used in this mode.");
   }
   if (Tuner.FLAGS.dev) buildDevPanel();
+  wireDevGesture();
 
   checkVer();
   requestShellTopUp();

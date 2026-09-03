@@ -158,6 +158,34 @@ for (const rate of RATES) {
     assertNoNaN(T);
   });
 
+  // --- 11: the bug a real violin found ----------------------------------------------
+  // Reported from an actual open G: the label read E5. Cause was scoring each candidate by the
+  // peak in a +-300 cent band around its FUNDAMENTAL — E5's band was 555-785 Hz, which contains
+  // G3's 3rd and 4th partials (587 and 782). On a real violin the G fundamental is weak, so those
+  // partials won. Fixed by narrowing the band to +-150 (catches neither) and scoring the harmonic
+  // SERIES so a rolled-off fundamental no longer loses the string.
+  //
+  // Fundamental at a tenth of the second partial — a deliberately brutal version of mic rolloff.
+  test(`[${rate}] violin open G with a rolled-off fundamental -> locks G3, NOT E5`, () => {
+    const t = violin();
+    const T = makeTuner({ rate, targets: t })
+      .feed(tone(t[0], SECONDS, rate, { amps: [0.03, 0.30, 0.20, 0.14, 0.10, 0.07, 0.05, 0.04] }));
+    const s = settledMode(T, "s");
+    assert.equal(s, 0, `locked ${s === 3 ? "E5 — the original bug" : "index " + s}, must be G3`);
+    assert.ok(Math.abs(settledCents(T)) < 1.0, `cents=${settledCents(T)}`);
+    assertNoNaN(T);
+  });
+
+  // The same failure mode one string over, and the plan's stated hardest case: phone mics roll off
+  // steeply below ~100 Hz, so cello C2's fundamental can be weaker than its second partial.
+  test(`[${rate}] cello C2 with a rolled-off fundamental -> locks C2, not G2`, () => {
+    const t = cello();
+    const T = makeTuner({ rate, targets: t })
+      .feed(tone(t[0], SECONDS, rate, { amps: [0.02, 0.30, 0.22, 0.15, 0.11, 0.08] }));
+    assert.equal(settledMode(T, "s"), 0, "must lock C2");
+    assertNoNaN(T);
+  });
+
   test(`[${rate}] cello C2 -> locks C2, not G2`, () => {
     const t = cello();
     const T = makeTuner({ rate, targets: t }).feed(tone(t[0], SECONDS, rate, { partials: 4 }));

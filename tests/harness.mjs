@@ -70,11 +70,18 @@ export const centsToRatio = (c) => Math.pow(2, c / 1200);
 
 // A bowed string is not a sine. `partials: n` sums n harmonics at 1/k amplitude, which is a crude
 // but honest stand-in — enough to exercise the detector's partial-series confusion cases.
-export function tone(freq, seconds, rate, { amp = 0.3, partials = 1, phase = 0, decay = 1 } = {}) {
+//
+// `amps: [...]` overrides the profile entirely, one amplitude per harmonic starting at the
+// fundamental. That is what models the case this app actually got wrong on a real instrument: a
+// violin G string whose FUNDAMENTAL is far weaker than its upper partials, because the body barely
+// radiates 196 Hz and a phone mic rolls off below it.
+export function tone(freq, seconds, rate, { amp = 0.3, partials = 1, phase = 0, decay = 1, amps = null } = {}) {
   const n = Math.floor(seconds * rate);
   const out = new Float32Array(n);
-  for (let k = 1; k <= partials; k++) {
-    const a = (amp / Math.pow(k, decay));
+  const count = amps ? amps.length : partials;
+  for (let k = 1; k <= count; k++) {
+    const a = amps ? amps[k - 1] : amp / Math.pow(k, decay);
+    if (!a) continue;
     const w = (2 * Math.PI * freq * k) / rate;
     for (let i = 0; i < n; i++) out[i] += a * Math.sin(w * i + phase * k);
   }
