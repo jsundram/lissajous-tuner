@@ -51,7 +51,7 @@ sed -i '' "s/const V = \"${cur}\"/const V = \"${next}\"/" sw.js
 sed -i '' "s/^const VER_PREFIX = \"[^\"]*\";/const VER_PREFIX = \"${stem}\";/" app.js
 echo "V: ${cur} -> ${next}"
 
-./scripts/stamp-build.sh
+./scripts/stamp-build.sh --deploy
 
 git add -A
 echo "--- sw-lint (V bumped and build.js stamped in the same commit) ---"

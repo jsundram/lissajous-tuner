@@ -12,9 +12,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 sha="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-# A dirty tree is a build that does not correspond to any commit. Say so, loudly, in the id itself:
-# testing uncommitted code and reporting it as the committed SHA is its own lost cycle.
-if ! git diff --quiet HEAD -- . ':(exclude)build.js' 2>/dev/null; then sha="${sha}+"; fi
+
+# A dirty tree is a build that does not correspond to any commit. Say so, loudly, in the id itself
+# with a trailing "+": testing uncommitted code while reporting it as the committed SHA is its own
+# lost cycle, and it is the single most common way a bug report ends up unreproducible.
+#
+# --deploy suppresses that, and only deploy.sh passes it. There, the tree is legitimately dirty at
+# stamp time — the V bump has already edited sw.js and app.js, and all of it is about to land in
+# one commit — so the marker would fire on every deploy and mean nothing. Everywhere else the check
+# stands.
+if [ "${1:-}" != "--deploy" ]; then
+  if ! git diff --quiet HEAD -- . ':(exclude)build.js' 2>/dev/null; then sha="${sha}+"; fi
+fi
 v="$(grep -o 'const V = "[^"]*"' sw.js | head -1 | sed 's/.*"\(.*\)"/\1/')"
 
 cat > build.js <<EOF
