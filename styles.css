@@ -114,8 +114,8 @@ a{ color:var(--accent) }
 
 /* ---- build id: always visible, never dev-gated -------------------------------------- */
 .buildid{
-  position:fixed; right:calc(4px + env(safe-area-inset-right)); bottom:calc(2px + env(safe-area-inset-bottom));
-  font:500 9px/1 ui-monospace, monospace; color:var(--muted); opacity:.55; pointer-events:none; z-index:20;
+  flex:0 0 auto; text-align:right; padding:0 2px;
+  font:500 9px/1 ui-monospace, monospace; color:var(--muted); opacity:.6;
 }
 
 /* Three-state theme toggle (auto/light/dark). Pushed to the right of the header. */

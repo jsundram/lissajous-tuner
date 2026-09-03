@@ -17,7 +17,10 @@
      Android reads the manifest. Ship both. -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- "default", NOT "black-translucent": that one draws the page under the status bar and forces
+     WHITE status-bar text, which is invisible against this app's light theme (#f4f3ef). The app
+     is theme-aware, so the status bar must be too, and only "default" lets iOS decide. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Tuner">
 <link rel="manifest" href="./manifest.json">
 
@@ -97,12 +100,14 @@
     </div>
   </div>
 
+  <!-- Build id, ALWAYS visible (not dev-gated): a bug report is worthless without it. It sits in
+       the normal flow rather than pinned to a corner — pinned, it collided with the last chip on a
+       375px-wide phone, and an unreadable build id is the same as no build id. -->
+  <div class="buildid" id="buildid" title="build"></div>
+
   <!-- The quartet-useful view: the whole instrument's state at a glance after one pass across
        the strings. -->
   <div class="chips" id="chips"></div>
-
-  <!-- Build id, ALWAYS visible (not dev-gated): a bug report is worthless without it. -->
-  <div class="buildid" id="buildid" title="build"></div>
 </div>
 
 <!-- Dev-only. Generated from Tuner.PARAMS, revealed by ?dev=1. -->
