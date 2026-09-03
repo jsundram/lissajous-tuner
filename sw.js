@@ -30,7 +30,7 @@
 // Get one wrong and the failure is a blank white screen offline, a lost offline copy, or a stale
 // one that never updates. The seven review rounds behind this design: #7.
 
-const V = "lt-v2";     // <-- BUMP ON EVERY SHELL CHANGE (rename the stem freely; keep the digits)
+const V = "lt-v3";     // <-- BUMP ON EVERY SHELL CHANGE (rename the stem freely; keep the digits)
 
 // "app-v" — the stem shared by every cache generation. app.js's VER_PREFIX must match it, and the
 // NUMERIC TAIL is load-bearing: it orders generations for the collect below and for checkVer()'s
@@ -46,7 +46,7 @@ function verNum(name) {
 
 const SHELL = [
   "./", "./index.html", "./styles.css",
-  "./app.js", "./theme.js", "./strings.js", "./manifest.json",
+  "./app.js", "./theme.js", "./strings.js", "./tuner.js", "./build.js", "./manifest.json",
   // Fetched by addModule() well after boot. It MUST be precached — a worklet is a normal
   // same-origin request, and missing it offline breaks the app in a way that looks exactly
   // like a DSP bug — but it is deliberately NOT in BOOT_DEPS (see there).
@@ -320,6 +320,11 @@ async function cacheLookup(req) {
 //     ./theme.js are boot-critical and belong here. NOTE: tuner-worklet.js does NOT — it is
 //     fetched by addModule() well after boot, and gating the document on it would replace a
 //     working "tap to start" screen with an error page. It still must be in SHELL.
+// app.js calls straight into Theme, Strings and Tuner during boot, so a missing one throws before
+// anything paints. build.js is NOT here: it is a one-line global that app.js reads defensively, so
+// its absence costs the build id, not the app.
+const BOOT = ["./app.js", "./theme.js", "./strings.js", "./tuner.js"];
+
 const BOOT_DEPS = {
   // One page, and app.js owns everything on it, so the root document is this app's bootability
   // case (the skeleton's was usage/). theme.js goes here too: app.js's boot() calls into it before
@@ -327,7 +332,7 @@ const BOOT_DEPS = {
   // same breath as the tuner UI. tuner-worklet.js deliberately stays OUT — addModule() fetches it
   // long after boot, and gating the document on it would replace a working "tap to start" screen
   // with an error page over a file the start button would have re-fetched anyway.
-  "": ["./app.js", "./theme.js"], "index.html": ["./app.js", "./theme.js"],
+  "": BOOT, "index.html": BOOT,
 };
 
 // Request pathname → BOOT_DEPS key, relative to the SW scope (works at user.github.io/repo/).

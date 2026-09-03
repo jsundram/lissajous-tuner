@@ -136,6 +136,8 @@ const seedBootableShell = () => {
   CACHE.set(b("usage/crunch.js"), makeResponse("CACHED_CRUNCH"));
   CACHE.set(b("app.js"), makeResponse("CACHED_APP"));
   CACHE.set(b("theme.js"), makeResponse("CACHED_THEME"));
+  CACHE.set(b("strings.js"), makeResponse("CACHED_STRINGS"));
+  CACHE.set(b("tuner.js"), makeResponse("CACHED_TUNER"));
 };
 
 (async () => {

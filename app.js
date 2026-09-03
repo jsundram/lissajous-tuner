@@ -1,148 +1,326 @@
-// App boot + the PWA integration example. index.html owns structure, styles.css
-// owns looks; app.js wires the runtime and hands you two hooks to fill in:
-//   render()  — (re)fetch + repaint. Runs on load, resume, poll, and PTR.
-//   paint()   — turn data into DOM. Kept separate so a theme change can repaint
-//               WITHOUT a network round-trip.
+// app.js — boot, the figure renderer, and UI wiring.
 //
-// What it wires for you: service worker + "tap to update" tag, theme (with the
-// JS-baked-color contract), stale-while-revalidate data, and the keep-fresh loop
-// (foreground poll + resume re-pull + optional pull-to-refresh).
+// index.html owns structure, styles.css owns looks, tuner.js owns the audio graph and the
+// parameters, tuner-worklet.js owns the DSP. This file turns the ~94 Hz stream of estimates into
+// pixels and text, and does no arithmetic on phase.
+//
+// What the figure means, precisely — and this is worth being careful about, because the plan
+// originally claimed something stronger. A 2:1 phasor ratio traces a FIXED closed curve (a
+// limacon), traversed once per 1/df. Its SHAPE is set by the partial's relative amplitude and
+// phase — a property of the string, bow and instrument. Its MOTION is the tuning error. So:
+// shape reads as timbre, motion reads as error. The shape says nothing about pitch, and no copy
+// in this UI may imply otherwise (ADDENDUM section 4).
 
-const VER_PREFIX = "lt-v";          // must match sw.js's V stem — and V's numeric tail is load-bearing
-const DATA_URL = "";               // <-- your cross-origin data endpoint (empty = disabled, like ping.js)
-const DATA_KEY = "main";           // localStorage cache slot for this endpoint
-const STALE_MS = 5 * 60 * 1000;    // cached data older than this is worth re-fetching
+const VER_PREFIX = "lt-v";   // must match sw.js's V stem — and V's numeric tail is load-bearing
 
-let lastData = null;               // last payload, so a theme change can repaint without refetching
+const el = (id) => document.getElementById(id);
+const fmtHz = (f) => (f >= 200 ? f.toFixed(1) : f.toFixed(2));
+const fmtCents = (c) => (c > 0 ? "+" : c < 0 ? "−" : "") + Math.abs(c).toFixed(1);
 
-// ---- data + rendering ------------------------------------------------------
-// CACHE-FIRST: peek → paint → revalidate → repaint only if changed. A returning
-// visitor sees real data instantly instead of the placeholder, even on a flaky
-// connection; the network round-trip happens behind the already-painted UI. Only
-// the true first run (nothing cached) falls back to awaiting the network.
-async function render(){
-  const app = document.getElementById("app");
-  if(!DATA_URL) return;            // no endpoint wired yet — leave the placeholder copy in index.html
+// Last reading per string index, so the chips show the whole instrument at a glance after one
+// pass across the strings — the quartet-useful view.
+const lastByString = {};
 
-  // Only the boot call needs the cache paint; on a poll/resume/PTR re-render the
-  // screen already shows this data, so painting it again would just flash.
-  const cached = lastData === null ? Data.peek(DATA_KEY) : null;
-  if(cached){                      // instant paint from the cache, no await
-    lastData = cached.data;
-    paint(cached.data);
-    showStale(cached);
+// ---- the figure ------------------------------------------------------------
+// The plan specifies decay trails as a canvas that is NEVER cleared, with a translucent background
+// fillRect composited over it each frame. That does not work in 8-bit canvas: the fade is
+// asymptotic, so each frame moves a channel by alpha*(target - current), which ROUNDS TO ZERO once
+// the gap is under ~1/(2*alpha) — about 17/255 at alpha 0.03. Every stroke therefore leaves a
+// permanent scar, and they accumulate for as long as the app is open. Measured on the real page:
+// a corner the trace had touched once sat at rgb(244,243,224) against a rgb(244,243,239) ground and
+// stayed there.
+//
+// So keep the points and restroke them. The plan rejected this as expensive, but the trail is only
+// ~0.5 s of a ~94 Hz stream: about 75 segments, redrawn at 60 fps. That is nothing, and it buys an
+// exact decay, correct behaviour across resize and theme changes, and the per-segment colour ramp
+// that was on the wish list anyway.
+//
+// Points are captured in the ESTIMATE handler, not in the rAF loop: sampling the latest estimate
+// once per frame would drop a third of a 94 Hz stream and duplicate others, which shows up as an
+// unevenly-spaced figure. Every estimate lands on the curve exactly once.
+const fig = {
+  canvas: null, ctx: null, w: 0, h: 0, dpr: 1,
+  pts: [],                   // {x, y, c, t} in worklet coords + capture time
+  running: false, frozen: false,
+};
+
+// The knob is a per-frame alpha, so convert it to a per-second decay constant at a nominal 60 fps.
+// Keeping the knob in the plan's units means a value calibrated on one device still means the same
+// thing on another, where the frame rate may not be 60.
+function decayPerSec() {
+  const a = Math.min(0.5, Math.max(0.001, Tuner.params.trailAlpha));
+  return -60 * Math.log(1 - a);
+}
+const TRAIL_FLOOR = 0.02;    // drop a point once it is this faint — invisible, and unbounded growth otherwise
+
+function resizeFigure() {
+  const c = fig.canvas;
+  if (!c) return;
+  const r = c.getBoundingClientRect();
+  const dpr = Math.min(3, window.devicePixelRatio || 1);   // cap: a 4x buffer costs fill rate
+  const w = Math.max(1, Math.round(r.width * dpr));
+  const h = Math.max(1, Math.round(r.height * dpr));
+  if (w === fig.w && h === fig.h && dpr === fig.dpr) return;
+  fig.w = c.width = w; fig.h = c.height = h; fig.dpr = dpr;
+}
+
+function bgColor() { return Theme.getCssColor("--bg") || "#0e1413"; }
+
+function clearFigure() {
+  if (!fig.ctx) return;
+  fig.ctx.setTransform(1, 0, 0, 1, 0, 0);
+  fig.ctx.fillStyle = bgColor();
+  fig.ctx.fillRect(0, 0, fig.w, fig.h);
+}
+
+// Colour the trace by error sign when asked. Deliberately a TASTE knob: it cannot change the
+// number, only how fast you read its sign — which the direction of rotation already tells you.
+function traceColor(cents) {
+  if (!Tuner.params.hueByError || cents === null || cents === undefined || Math.abs(cents) < 1.0) {
+    return Theme.getCssColor("--trace") || "#2ee6a8";
+  }
+  return Theme.getCssColor(cents > 0 ? "--sharp" : "--flat") || "#2ee6a8";
+}
+
+// Called once per estimate (~94 Hz), NOT per frame.
+function pushPoint(m) {
+  // Gated or searching: stop capturing. The existing points stay, so the figure freezes exactly as
+  // it was rather than decaying away — a decaying figure would erase the evidence of what the last
+  // real reading looked like, and a frozen one that still looks in tune is why the dimming exists.
+  if (m.st === 0 || m.st === 2) { fig.frozen = true; return; }
+  fig.frozen = false;
+  fig.pts.push({ x: m.x, y: m.y, c: m.c, t: performance.now() });
+  const cutoff = performance.now() - (-Math.log(TRAIL_FLOOR) / decayPerSec()) * 1000;
+  while (fig.pts.length && fig.pts[0].t < cutoff) fig.pts.shift();
+}
+
+function drawFrame() {
+  if (!fig.ctx) return;
+  if (fig.frozen) return;              // hold the last painted frame, untouched
+  const ctx = fig.ctx;
+  clearFigure();
+  if (fig.pts.length < 2) return;
+
+  const cx = fig.w / 2, cy = fig.h / 2;
+  const R = Math.min(fig.w, fig.h) * 0.36;
+  const rot = (Tuner.params.orientation * Math.PI) / 180;
+  const cos = Math.cos(rot), sin = Math.sin(rot);
+  const k = decayPerSec();
+  const now = performance.now();
+
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Tuner.params.strokeWidth * fig.dpr;
+
+  // y is negated: the worklet works in maths orientation, the canvas in screen orientation.
+  const px = (p) => cx + R * (p.x * cos - p.y * sin);
+  const py = (p) => cy - R * (p.x * sin + p.y * cos);
+
+  for (let i = 1; i < fig.pts.length; i++) {
+    const p = fig.pts[i];
+    const a = Math.exp(-k * (now - p.t) / 1000);
+    if (a < TRAIL_FLOOR) continue;
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = traceColor(p.c);
+    ctx.beginPath();
+    ctx.moveTo(px(fig.pts[i - 1]), py(fig.pts[i - 1]));
+    ctx.lineTo(px(p), py(p));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function loop() {
+  if (!fig.running) return;
+  resizeFigure();
+  drawFrame();
+  requestAnimationFrame(loop);
+}
+
+// ---- readouts ---------------------------------------------------------------
+function paintEstimate(m) {
+  pushPoint(m);
+  const stage = document.querySelector(".stage");
+  stage.classList.toggle("gated", m.st === 0);
+  stage.classList.toggle("searching", m.st === 2);
+
+  const names = Tuner.stringNames();
+  const targets = Tuner.targets();
+  const nameEl = el("string-name");
+
+  if (m.s >= 0 && m.s < names.length) {
+    nameEl.textContent = names[m.s];
+    el("target-hz").textContent = fmtHz(targets[m.s]) + " Hz";
+  } else {
+    nameEl.textContent = "—";
+    el("target-hz").textContent = "";
   }
 
-  try{
-    const res = await Data.revalidate(DATA_URL, { key: DATA_KEY, timeoutMs: 5000 });
-    if(res.changed || lastData === null){   // skip the repaint (and its flash) when nothing moved
-      const first = lastData === null;
-      lastData = res.data;
-      if(first) paint(res.data);            // nothing on screen yet — no transition to make
-      else applyUpdate(res.data);           // replacing live content — do it gently
+  const centsEl = el("cents");
+  const dirEl = el("direction");
+  centsEl.classList.remove("sharp", "flat");
+
+  if (m.st === 2) {
+    centsEl.textContent = "—"; dirEl.textContent = "listening";
+    el("measured-hz").textContent = "";
+  } else if (m.st === 3) {
+    // Past the reporting range we may be locked to the wrong string, so a number would be a lie.
+    centsEl.textContent = "—"; dirEl.textContent = "out of range";
+    el("measured-hz").textContent = "";
+  } else if (m.c === null) {
+    centsEl.textContent = "—"; dirEl.textContent = " ";
+  } else {
+    centsEl.textContent = fmtCents(m.c);
+    // Rotation direction already gives the sign; the word is here anyway because reading a
+    // direction takes a beat longer than reading a word.
+    dirEl.textContent = Math.abs(m.c) < 0.5 ? "in tune" : m.c > 0 ? "sharp" : "flat";
+    if (Math.abs(m.c) >= 0.5) centsEl.classList.add(m.c > 0 ? "sharp" : "flat");
+    if (m.s >= 0) {
+      el("measured-hz").textContent = fmtHz(targets[m.s] * Math.pow(2, m.c / 1200)) + " Hz";
+      lastByString[m.s] = m.c;
     }
-    showStale(res);                // always: clears the "cached · N min old" tag
-  }catch{
-    // Offline, timed out, or the endpoint returned an empty/invalid payload —
-    // data.js refused to cache it, so whatever is on screen is still the best
-    // copy we have. Only a run that never painted anything has nothing to show.
-    const c = Data.peek(DATA_KEY);
-    if(c) showStale(c);            // re-flag it stale: the network read didn't land
-    else if(lastData === null) app.textContent = "Couldn't load data and nothing is cached yet — reconnect and reopen.";
   }
+  paintChips(m.s);
 }
 
-// Swap in freshly-revalidated data WITHOUT yanking the page out from under the
-// reader. Cache-first means the user is already looking at content when the
-// network lands, so a naive paint() resets scroll and pops layout.
-// Reviewed against real downstream DOM (pwa-starter#6: musiclog, haydn scatter);
-// what survived, in order of how much it matters:
-//   1. don't repaint at all unless the payload changed  (res.changed, in render)
-//      — the load-bearing defense, worth more than everything below combined.
-//   2. restore scroll — rebuilding a container resets it to 0. Window-level only,
-//      and that's the right floor: even a list-heavy app usually scrolls the
-//      document, and inner overflow containers built by keyed joins keep their
-//      own offsets. If yours don't, restoring them is paint()'s job.
-//   3. crossfade the swap via a View Transition where supported. Skipped under
-//      prefers-reduced-motion; unsupported browsers take the plain path. Two
-//      caveats at real DOM size: startViewTransition freezes rendering while
-//      swap() runs, so a heavy synchronous paint() (thousands of SVG nodes, a
-//      force layout) turns the crossfade into a visible stall — and its async
-//      snapshot→swap gap is a window another repaint (theme flip, resize) can
-//      land in. Fine at this skeleton's scale; measure before keeping it in a
-//      big app.
-// What was CUT (see #6): restoring focus. Dead code in both paint regimes — a
-// paint() that wipes-and-rebuilds destroys the focused node (document.contains()
-// fails), and one that patches in place never loses focus. Real recovery means
-// re-finding the element by id after the rebuild, which only your paint() can do.
-// What's deliberately NOT here: deferring the update while the user is mid-
-// interaction (defense 4, see CLAUDE.md). The triggers generalize — (a) an open
-// overlay: menu, dropdown, tooltip, fullscreen; (b) focus inside a form control;
-// (c) a pointer gesture in flight — but every predicate is app-specific, so it
-// belongs in your shouldDefer(), not in the skeleton.
-function applyUpdate(data){
-  const y = scrollY;
-  const swap = () => {
-    paint(data);
-    if(scrollY !== y) scrollTo(0, y);
+function paintChips(activeIdx) {
+  const wrap = el("chips");
+  const names = Tuner.stringNames();
+  if (wrap.children.length !== names.length) {
+    wrap.innerHTML = "";
+    names.forEach(() => {
+      const d = document.createElement("div");
+      d.className = "chip";
+      d.innerHTML = "<b></b><span></span>";
+      wrap.appendChild(d);
+    });
+  }
+  names.forEach((n, i) => {
+    const chip = wrap.children[i];
+    const c = lastByString[i];
+    chip.classList.toggle("active", i === activeIdx);
+    chip.classList.remove("sharp", "flat");
+    chip.children[0].textContent = n;
+    if (c === undefined) { chip.children[1].textContent = "–"; return; }
+    chip.children[1].textContent = fmtCents(c);
+    if (Math.abs(c) >= 0.5) chip.classList.add(c > 0 ? "sharp" : "flat");
+  });
+}
+
+// ---- controls ----------------------------------------------------------------
+// The shipped UI is three controls. Everything else is behind ?dev=1 and, once calibrated, gets
+// baked into source and the knob deleted.
+function buildSegmented(node, options, get, set) {
+  node.innerHTML = "";
+  options.forEach(([value, label]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.textContent = label;
+    b.onclick = () => { set(value); syncControls(); };
+    b.dataset.value = value;
+    node.appendChild(b);
+  });
+  node._get = get;
+}
+
+function syncControls() {
+  for (const id of ["instrument", "temperament"]) {
+    const node = el(id);
+    const current = String(node._get());
+    for (const b of node.children) b.setAttribute("aria-checked", String(b.dataset.value === current));
+  }
+  el("refa-value").textContent = Tuner.settings.refA.toFixed(1);
+  // A changed instrument means a different number of strings and different targets; drop the
+  // per-string memory rather than showing a G3 reading under a C2 label.
+  paintChips(Tuner.engine.lastEstimate ? Tuner.engine.lastEstimate.s : -1);
+}
+
+function wireControls() {
+  buildSegmented(el("instrument"),
+    Object.keys(Strings.INSTRUMENTS).map((k) => [k, Strings.INSTRUMENTS[k].label]),
+    () => Tuner.settings.instrument,
+    (v) => { for (const k in lastByString) delete lastByString[k]; Tuner.setSetting("instrument", v); });
+
+  buildSegmented(el("temperament"), [["pure", "Pure"], ["equal", "Equal"]],
+    () => Tuner.settings.temperament,
+    (v) => Tuner.setSetting("temperament", v));
+
+  // Reference A: 392–466 in 0.5 Hz steps.
+  const stepA = (d) => {
+    const next = Math.min(466, Math.max(392, Math.round((Tuner.settings.refA + d) * 2) / 2));
+    Tuner.setSetting("refA", next);
+    syncControls();
   };
-  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if(document.startViewTransition && !still) document.startViewTransition(swap);
-  else swap();
+  el("refa-down").onclick = () => stepA(-0.5);
+  el("refa-up").onclick = () => stepA(0.5);
+
+  el("theme").onclick = () => Theme.cycle();
+  el("start").onclick = onStart;
 }
 
-function paint(data){
-  // → your app goes here. Read `data`, paint the DOM. Runs on first load, on
-  //   resume, after a pull-to-refresh, AND on every theme change — so keep it
-  //   idempotent, and read any baked colors via Theme.getCssColor(token).
-  document.getElementById("app").textContent = JSON.stringify(data);
+function updateThemeLabel() {
+  const b = el("theme");
+  if (b) b.textContent = Theme.get().replace(/^./, (c) => c.toUpperCase());
 }
 
-function showStale(res){          // "loaded from cache, N min old" so the user knows they're offline
-  const tag = document.getElementById("stale");
-  if(!tag) return;
-  if(res.stale){
-    tag.hidden = false;
-    tag.textContent = `cached · ${Math.round(res.ageMs / 60000)} min old`;
-  }else{
-    tag.hidden = true;
+function onThemeChange() {
+  updateThemeLabel();
+  clearFigure();   // every frame repaints from the point buffer, so the new ground is enough
+}
+
+// ---- start / failure states ---------------------------------------------------
+function showOverlay(msg, button, note, isError) {
+  const o = el("overlay");
+  o.hidden = false;
+  o.classList.toggle("error", !!isError);
+  el("overlay-msg").textContent = msg;
+  el("start").textContent = button;
+  el("start").hidden = !button;
+  el("overlay-note").textContent = note || "";
+}
+
+async function onStart() {
+  showOverlay("Starting…", "", "");
+  try {
+    await Tuner.start();
+    el("overlay").hidden = true;
+    fig.running = true;
+    fig.pts.length = 0;
+    clearFigure();
+    requestAnimationFrame(loop);
+  } catch (err) {
+    const name = (err && err.name) || String(err);
+    // Real UI for the failures that actually happen, not a console message.
+    if (name === "NotAllowedError" || name === "SecurityError") {
+      showOverlay(
+        "Microphone access was denied. The tuner cannot hear anything without it.",
+        "Try again",
+        "Safari: aA menu → Website Settings → Microphone → Allow. Installed to the home screen, check iOS Settings → Lissajous Tuner.",
+        true);
+    } else if (name === "NotFoundError") {
+      showOverlay("No microphone found on this device.", "Try again", "", true);
+    } else {
+      showOverlay("Could not start audio: " + name, "Try again", "", true);
+    }
   }
 }
 
-// Re-fetch only if visible AND actually stale — so a backgrounded tab never
-// fetches and a just-loaded one isn't hit again. ageMs() answers "how stale?"
-// with no network call.
-function maybeRefresh(){
-  if(document.visibilityState !== "visible") return;
-  if(!DATA_URL) return;
-  if(Data.ageMs(DATA_KEY) < STALE_MS) return;
-  render();
-}
-
-// ---- theme -----------------------------------------------------------------
-function onThemeChange(){
-  // theme.js already cleared the color cache before calling us. Repaint anything
-  // that baked a color into JS (canvas/SVG); pure var(--…) elements updated free.
-  updateThemeLabel();
-  if(lastData) paint(lastData);
-}
-
-function wireThemeToggle(){
-  const btn = document.getElementById("theme");
-  if(!btn) return;
-  btn.onclick = () => Theme.cycle();   // cycle fires onThemeChange, which updates the label
-  updateThemeLabel();
-}
-
-function updateThemeLabel(){
-  const btn = document.getElementById("theme");
-  if(btn) btn.textContent = "Theme: " + Theme.get().replace(/^./, c => c.toUpperCase());
+// ---- build id ------------------------------------------------------------------
+// Always visible, never dev-gated. checkVer() may later append a "→ newer" hint and make it
+// tappable; until then this is just the identity of what is on screen.
+function paintBuildId(extra, onTap) {
+  const b = el("buildid");
+  if (!b) return;
+  const info = window.BUILD || { sha: "dev", v: "?" };
+  b.textContent = info.sha + " · " + info.v + (extra || "");
+  b.style.pointerEvents = onTap ? "auto" : "none";
+  b.style.cursor = onTap ? "pointer" : "";
+  b.onclick = onTap || null;
 }
 
 // ---- service-worker version tag (unchanged plumbing) -----------------------
 async function checkVer(){
-  const tag = document.getElementById("ver");
-  if(!tag) return;
   // HIGHEST version, not the first key: two caches can legitimately coexist for a while (sw.js
   // keeps the old one as a net until the new precache is complete), and caches.keys() is in
   // creation order — so find() would report the OLD version as installed and show a permanent
@@ -168,7 +346,7 @@ async function checkVer(){
       .map(([, k]) => k)
       .pop() || "";
   }catch{}
-  if(!installed){ tag.hidden = true; return; }
+  if(!installed){ paintBuildId(); return; }
 
   let latest = "";
   try{   // ?_= + no-store dodges both the SW cache and the HTTP cache → the live sw.js on the server
@@ -181,12 +359,11 @@ async function checkVer(){
     latest = (src.match(/const V\s*=\s*"([^"]*)"/) || ["", ""])[1];
   }catch{}   // offline: leave latest empty → neutral tag, never a false "behind"
 
+  // The build id is always on screen, so the "you're behind" affordance rides on it rather than
+  // occupying a second slot. `installed` is the SW cache generation; build.js's own .v is what
+  // was stamped at deploy — they agree unless the cache is mid-swap.
   const behind = latest && latest !== installed;
-  tag.hidden = false;
-  tag.className = "ver" + (behind ? " behind" : "");
-  tag.textContent = behind ? `${installed} → ${latest}` : installed;
-  tag.title = behind ? "New version available — tap to update" : "Up to date";
-  tag.onclick = behind ? forceUpdate : null;
+  paintBuildId(behind ? "  →  " + latest + " · tap to update" : "", behind ? forceUpdate : null);
 }
 
 async function forceUpdate(){   // the hammer: drop every cache, reload → SW reinstalls the latest shell
@@ -207,30 +384,274 @@ function requestShellTopUp(){
     .catch(() => {});
 }
 
-// ---- boot ------------------------------------------------------------------
-function boot(){
-  if("serviceWorker" in navigator){
-    navigator.serviceWorker.register("./sw.js").catch(()=>{});
-    // A registration can exist with no ACTIVE worker for a moment — first install, or the swap
-    // during an update — and the top-up ping is fire-and-forget, so it would simply be dropped
-    // and nothing would retry until the next launch. That undercuts the whole "open it once with
-    // a connection and it repairs itself" promise, so retry when a worker takes control.
+// ---- dev panel (?dev=1) ----------------------------------------------------------
+// Generated from Tuner.PARAMS so adding a knob is one line. The two classes are rendered as two
+// SEPARATE groups on purpose: a taste knob cannot produce a wrong reading, a measurement knob can,
+// and putting them in one list invites the second to be treated like the first.
+let devStatsTimer = null;
+
+function buildDevPanel() {
+  const panel = el("dev");
+  panel.hidden = false;
+  // Build it, but open it CLOSED. The panel is fixed to the bottom of the viewport, so leaving it
+  // open on load covers the Start button — with ?dev=1 the app could not be started at all, on a
+  // phone or anywhere else. The toggle is the only thing on screen until you ask for the rest.
+  panel.style.display = "none";
+
+  const toggle = document.createElement("button");
+  toggle.className = "dev-toggle";
+  toggle.textContent = "dev";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.onclick = () => {
+    const open = panel.style.display === "none";
+    panel.style.display = open ? "" : "none";
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  document.body.appendChild(toggle);
+
+  // Live measurements. This is what turns the one unverifiable constant in the plan into a minimum
+  // on a curve you can see: sweep the bandwidth against a sustained real note and take the lowest
+  // value whose jitter stops improving but which doesn't drop lock under vibrato.
+  const stats = document.createElement("div");
+  stats.className = "dev-stats";
+  stats.innerHTML = `
+    <div><b id="st-jitter">–</b><small>cents SD (2 s)</small></div>
+    <div><b id="st-drops">0</b><small>lock drops</small></div>
+    <div><b id="st-gates">0</b><small>gate closes</small></div>
+    <div><b id="st-rate">–</b><small>sample rate</small></div>
+    <div><b id="st-state">–</b><small>state</small></div>`;
+  panel.appendChild(stats);
+
+  for (const cls of ["measure", "taste"]) {
+    const h = document.createElement("h3");
+    h.innerHTML = cls === "measure"
+      ? 'Measurement <em>— changes what the app reports. Calibrate, then bake into source.</em>'
+      : 'Taste <em>— cannot produce a wrong reading.</em>';
+    panel.appendChild(h);
+
+    for (const key in Tuner.PARAMS) {
+      const spec = Tuner.PARAMS[key];
+      if (spec.cls !== cls) continue;
+      const row = document.createElement("div");
+      row.className = "dev-row";
+      const value = Tuner.params[key];
+      row.innerHTML = `<label for="p-${key}">${spec.label}</label>
+        <output id="o-${key}">${value}${spec.unit ? " " + spec.unit : ""}</output>
+        <input type="range" id="p-${key}" min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${value}">
+        ${spec.help ? `<div class="help">${spec.help}</div>` : ""}`;
+      panel.appendChild(row);
+      row.querySelector("input").oninput = (e) => {
+        const v = parseFloat(e.target.value);
+        Tuner.setParam(key, v);
+        el("o-" + key).textContent = v + (spec.unit ? " " + spec.unit : "");
+        syncHash();
+      };
+    }
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "dev-actions";
+  actions.innerHTML = `
+    <button type="button" id="dev-copy">Copy diagnostics</button>
+    <button type="button" id="dev-js">Copy as JS</button>
+    <button type="button" id="dev-rec">Record 15 s</button>
+    <button type="button" id="dev-reset">Reset params</button>`;
+  panel.appendChild(actions);
+
+  el("dev-copy").onclick = () => copyText(diagnostics(), el("dev-copy"), "Copy diagnostics");
+  el("dev-js").onclick = () => copyText(paramsAsJs(), el("dev-js"), "Copy as JS");
+  el("dev-reset").onclick = () => { Tuner.resetParams(); location.hash = ""; location.reload(); };
+  el("dev-rec").onclick = onRecord;
+
+  devStatsTimer = setInterval(paintDevStats, 250);
+  applyHash();
+}
+
+function paintDevStats() {
+  const j = Tuner.jitter();
+  const s = Tuner.engine.stats;
+  const m = Tuner.engine.lastEstimate;
+  const STATES = ["gated", "locked", "searching", "out of range"];
+  el("st-jitter").textContent = j === null ? "–" : j.toFixed(3);
+  el("st-drops").textContent = s.lockDrops;
+  el("st-gates").textContent = s.gateCloses;
+  el("st-rate").textContent = Tuner.engine.ctx ? Tuner.engine.ctx.sampleRate : "–";
+  el("st-state").textContent = m ? STATES[m.st] : "–";
+}
+
+// Sync live values into the URL hash, so a configuration you like is a link you can text yourself.
+function syncHash() {
+  const diff = changedParams();
+  location.replace("#" + new URLSearchParams(diff).toString());
+}
+function applyHash() {
+  if (!location.hash || location.hash.length < 2) return;
+  const q = new URLSearchParams(location.hash.slice(1));
+  for (const [k, v] of q) {
+    if (!(k in Tuner.PARAMS)) continue;
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) continue;
+    Tuner.setParam(k, n);
+    const input = el("p-" + k), out = el("o-" + k);
+    if (input) input.value = n;
+    if (out) out.textContent = n + (Tuner.PARAMS[k].unit ? " " + Tuner.PARAMS[k].unit : "");
+  }
+}
+
+function changedParams() {
+  const diff = {};
+  for (const k in Tuner.PARAMS) {
+    if (Tuner.params[k] !== Tuner.PARAMS[k].def) diff[k] = Tuner.params[k];
+  }
+  return diff;
+}
+
+// Only the parameters that DIFFER from default, ready to paste back into source. The constants
+// ship; the panel does not need to.
+function paramsAsJs() {
+  const diff = changedParams();
+  if (!Object.keys(diff).length) return "// all parameters at default\n";
+  const body = Object.keys(diff).map((k) => `  ${k}: ${diff[k]},`).join("\n");
+  return `// paste into tuner.js PARAMS defaults\nconst VIZ = {\n${body}\n};\n`;
+}
+
+// One pasteable block. Everything needed to reproduce a report without a conversation about it.
+function diagnostics() {
+  const e = Tuner.engine;
+  const m = e.lastEstimate;
+  const b = window.BUILD || {};
+  const t = Tuner.targets();
+  const names = Tuner.stringNames();
+  const standalone = window.matchMedia("(display-mode: standalone)").matches
+    || window.navigator.standalone === true;
+  const STATES = ["gated", "locked", "searching", "out of range"];
+  const j = Tuner.jitter();
+  const lines = [
+    "Lissajous Tuner — diagnostics",
+    "build        " + (b.sha || "?") + " · " + (b.v || "?") + "  built " + (b.at || "?"),
+    "url          " + location.href,
+    "display      " + (standalone ? "standalone (installed)" : "browser tab"),
+    "UA           " + navigator.userAgent,
+    "sampleRate   " + (e.ctx ? e.ctx.sampleRate : "(not started)"),
+    "instrument   " + e.settings.instrument + "   refA " + e.settings.refA.toFixed(1) + "   " + e.settings.temperament,
+    "string       " + (m && m.s >= 0 ? names[m.s] + " (index " + m.s + ")" : "(none locked)"),
+    "target       " + (m && m.s >= 0 ? t[m.s].toFixed(3) + " Hz" : "–"),
+    "cents        " + (m && m.c !== null && m.c !== undefined ? fmtCents(m.c) : "(not reported)"),
+    "measured     " + (m && m.c !== null && m.s >= 0 ? (t[m.s] * Math.pow(2, m.c / 1200)).toFixed(3) + " Hz" : "–"),
+    "state        " + (m ? m.st + " (" + STATES[m.st] + ")" : "–"),
+    "jitter       " + (j === null ? "–" : j.toFixed(4) + " cents SD over 2 s"),
+    "lock drops   " + e.stats.lockDrops,
+    "gate closes  " + e.stats.gateCloses,
+    "messages     " + e.stats.messages,
+    "test mode    " + (Tuner.FLAGS.test ? "on, " + Tuner.FLAGS.cents + " cents" : "off"),
+    "params       " + JSON.stringify(Tuner.params),
+    "non-default  " + JSON.stringify(changedParams()),
+  ];
+  return lines.join("\n") + "\n";
+}
+
+function copyText(text, button, label) {
+  const done = (ok) => {
+    button.textContent = ok ? "Copied ✓" : "Copy failed";
+    setTimeout(() => { button.textContent = label; }, 1400);
+  };
+  // navigator.clipboard needs a secure context AND is absent in some iOS standalone cases, so
+  // keep the execCommand fallback — a diagnostics button that silently does nothing is worse
+  // than no button.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => done(true), () => fallback());
+  } else fallback();
+
+  function fallback() {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      done(ok);
+    } catch (e) { done(false); }
+  }
+}
+
+// Record raw PCM, then hand back a .f32 plus a sidecar JSON. A recording of a real bowed cello C2
+// is worth more than any synthetic fixture in this repo — these two files drop straight into
+// tests/ as an additional case.
+function onRecord() {
+  const btn = el("dev-rec");
+  if (!Tuner.engine.running) { btn.textContent = "start first"; setTimeout(() => btn.textContent = "Record 15 s", 1400); return; }
+  btn.textContent = "Recording…";
+  Tuner.engine.onRecording = (data) => {
+    btn.textContent = "Record 15 s";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const m = Tuner.engine.lastEstimate;
+    download(new Blob([data.rec.buffer], { type: "application/octet-stream" }), `tuner-${stamp}.f32`);
+    download(new Blob([JSON.stringify({
+      sampleRate: data.sampleRate,
+      instrument: Tuner.settings.instrument,
+      string: m && m.s >= 0 ? Tuner.stringNames()[m.s] : null,
+      stringIndex: m ? m.s : -1,
+      refA: Tuner.settings.refA,
+      temperament: Tuner.settings.temperament,
+      samples: data.rec.length,
+      params: Tuner.params,
+    }, null, 2)], { type: "application/json" }), `tuner-${stamp}.json`);
+    // Replay it immediately: the same audio under whatever parameters you move next.
+    Tuner.replay(data.rec, data.sampleRate);
+  };
+  Tuner.record(15);
+}
+
+function download(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// ---- boot ------------------------------------------------------------------------
+function boot() {
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
     navigator.serviceWorker.addEventListener("controllerchange", requestShellTopUp);
   }
 
-  Theme.init();                       // re-apply pre-paint attr + watch the OS for auto-mode users
+  Theme.init();
   Theme.subscribe(onThemeChange);
-  wireThemeToggle();
+  updateThemeLabel();
 
-  render();
+  fig.canvas = el("figure");
+  fig.ctx = fig.canvas.getContext("2d");
+  resizeFigure();
+  addEventListener("resize", resizeFigure);
+
+  wireControls();
+  syncControls();
+  paintChips(-1);
+  paintBuildId();
+
+  Tuner.engine.onEstimate = paintEstimate;
+
+  if (Tuner.FLAGS.test) {
+    // Self-test: no microphone involved, so say what is being asserted rather than asking for
+    // permission the app will not use.
+    showOverlay(
+      `Self-test: a synthetic tone ${Tuner.FLAGS.cents} cents off. At 3.93 cents the figure turns exactly once per second.`,
+      "Run self-test", "No microphone is used in this mode.");
+  }
+  if (Tuner.FLAGS.dev) buildDevPanel();
+
   checkVer();
   requestShellTopUp();
 
-  setInterval(maybeRefresh, STALE_MS);                                       // foreground poll
-
-  // iOS home-screen apps RESUME rather than reload — re-pull (gated), re-check version, and
-  // re-ping the shell top-up on foreground.
-  addEventListener("visibilitychange", () => { if(!document.hidden){ maybeRefresh(); checkVer(); requestShellTopUp(); } });
+  // iOS home-screen apps RESUME rather than reload.
+  addEventListener("visibilitychange", () => {
+    if (!document.hidden) { checkVer(); requestShellTopUp(); }
+  });
 }
 
 boot();

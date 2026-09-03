@@ -58,14 +58,62 @@
 <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-<main>
-  <section id="app" class="card">
-    <p>Skeleton. The tuner UI lands in step 4.</p>
-  </section>
-</main>
+<div id="tuner">
 
-<!-- Load order matters: theme.js exposes globals app.js uses. -->
+  <!-- Top bar: the ONLY three controls that ship. A tuner with fourteen sliders is a worse tuner —
+       everything else lives behind ?dev=1 and gets baked into source once calibrated. -->
+  <header class="bar">
+    <div class="seg" id="instrument" role="radiogroup" aria-label="Instrument"></div>
+    <div class="spacer"></div>
+    <div class="stepper" aria-label="Reference A">
+      <button type="button" id="refa-down" aria-label="Lower reference A">&minus;</button>
+      <span id="refa-value">440.0</span>
+      <button type="button" id="refa-up" aria-label="Raise reference A">+</button>
+    </div>
+    <div class="seg" id="temperament" role="radiogroup" aria-label="Temperament"></div>
+    <button id="theme" type="button" class="theme-toggle">Auto</button>
+  </header>
+
+  <!-- The figure, as large as fits. Corner overlays sit ON it rather than beside it so the figure
+       gets the whole square. -->
+  <div class="stage">
+    <canvas id="figure"></canvas>
+
+    <div class="hud" aria-live="polite">
+      <div class="hud-tl"><span id="string-name">&mdash;</span></div>
+      <div class="hud-tr"><span id="target-hz"></span><small>target</small></div>
+      <div class="hud-bl"><span id="measured-hz"></span><small>measured</small></div>
+      <div class="hud-br"><span id="cents">&mdash;</span><small id="direction">&nbsp;</small></div>
+    </div>
+
+    <!-- Real UI for the states that actually happen: needing a gesture, being refused the mic,
+         and hearing nothing. A console message is not a user interface. -->
+    <div class="overlay" id="overlay">
+      <div class="overlay-inner">
+        <p id="overlay-msg">Tune a violin, viola or cello by watching a figure turn.</p>
+        <button type="button" id="start" class="start">Start listening</button>
+        <p class="overlay-note" id="overlay-note">Needs microphone access. Nothing is recorded or sent anywhere.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- The quartet-useful view: the whole instrument's state at a glance after one pass across
+       the strings. -->
+  <div class="chips" id="chips"></div>
+
+  <!-- Build id, ALWAYS visible (not dev-gated): a bug report is worthless without it. -->
+  <div class="buildid" id="buildid" title="build"></div>
+</div>
+
+<!-- Dev-only. Generated from Tuner.PARAMS, revealed by ?dev=1. -->
+<aside class="dev" id="dev" hidden></aside>
+
+<!-- Load order matters: strings.js and tuner.js expose globals app.js uses; build.js is a
+     generated one-liner. -->
+<script src="./build.js"></script>
 <script src="./theme.js"></script>
+<script src="./strings.js"></script>
+<script src="./tuner.js"></script>
 <script src="./app.js"></script>
 
 <!-- GoatCounter (anonymous public stats). Cross-origin and async by design: deliberately NOT in

@@ -24,31 +24,139 @@ body{
   background:var(--bg); color:var(--ink);
   font-family:system-ui, -apple-system, "Segoe UI", sans-serif; line-height:1.45;
   overscroll-behavior-y:none;             /* kill the rubber-band bounce in standalone */
-  /* safe-area padding: real gaps on notched phones, 0 elsewhere */
-  padding:calc(20px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
-          calc(28px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  overflow:hidden;                        /* one screen, no scrolling — the figure must not move */
 }
-main{ max-width:var(--maxw); margin:0 auto }   /* mobile-first: full-width phone, capped desktop */
-
-.head{ display:flex; align-items:baseline; gap:10px; margin-bottom:16px }
-h1{ font-size:clamp(24px, 6vw, 34px); letter-spacing:-.01em }
-
-.card{ background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px }
 a{ color:var(--accent) }
 
-/* The "you're on an old version — tap to update" tag (app.js). Neutral when current,
-   accented + tappable when the server is ahead. */
-.ver{ font:500 11px/1 ui-monospace, monospace; color:var(--muted) }
-.ver.behind{ color:var(--accent); text-decoration:underline; cursor:pointer }
+/* The whole app is one viewport-tall column: bar / figure / chips. dvh (not vh) so iOS Safari's
+   collapsing toolbar doesn't leave the bottom row under the chrome. */
+#tuner{
+  height:100dvh; display:flex; flex-direction:column; gap:8px;
+  padding:calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+          calc(8px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+}
 
-/* "cached · N min old" — shown by app.js when data came from the SWR fallback (offline). */
-.stale{ font:500 11px/1 ui-monospace, monospace; color:var(--accent) }
+/* ---- top bar: instrument / reference A / temperament ---------------------------- */
+.bar{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; flex:0 0 auto }
+.spacer{ flex:1 1 auto }
+
+.seg{ display:flex; border:1px solid var(--line); border-radius:999px; overflow:hidden }
+.seg button{
+  appearance:none; border:0; background:transparent; color:var(--muted); cursor:pointer;
+  font:600 12px/1 system-ui, sans-serif; padding:8px 12px; min-height:34px;   /* real tap target */
+}
+.seg button[aria-checked="true"]{ background:var(--accent); color:var(--bg) }
+
+.stepper{ display:flex; align-items:center; gap:2px; border:1px solid var(--line); border-radius:999px }
+.stepper button{
+  appearance:none; border:0; background:transparent; color:var(--ink); cursor:pointer;
+  font:600 15px/1 system-ui, sans-serif; padding:8px 12px; min-height:34px; min-width:34px;
+}
+#refa-value{ font:600 12px/1 ui-monospace, monospace; min-width:44px; text-align:center; color:var(--muted) }
+
+/* ---- the figure ------------------------------------------------------------------ */
+/* min-height:0 is load-bearing: without it a flex child refuses to shrink below its content and
+   the chips row gets pushed off the bottom of the viewport. */
+.stage{ position:relative; flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:center }
+#figure{ display:block; width:100%; height:100%; touch-action:none }
+
+/* Corner overlays sit ON the figure so it gets the whole square. pointer-events:none so they
+   never eat a tap meant for the canvas. */
+.hud{ position:absolute; inset:0; pointer-events:none; font-variant-numeric:tabular-nums }
+.hud > div{ position:absolute; display:flex; flex-direction:column; gap:2px }
+.hud small{ font:500 10px/1 system-ui, sans-serif; color:var(--muted); letter-spacing:.04em; text-transform:uppercase }
+.hud-tl{ top:0; left:0 }
+.hud-tr{ top:0; right:0; align-items:flex-end }
+.hud-bl{ bottom:0; left:0 }
+.hud-br{ bottom:0; right:0; align-items:flex-end }
+
+#string-name{ font:700 clamp(34px, 11vw, 60px)/1 system-ui, sans-serif; letter-spacing:-.02em }
+#target-hz, #measured-hz{ font:600 13px/1 ui-monospace, monospace; color:var(--ink) }
+#cents{ font:700 clamp(26px, 8vw, 42px)/1 ui-monospace, monospace; letter-spacing:-.02em }
+#cents.sharp{ color:var(--sharp) }
+#cents.flat{ color:var(--flat) }
+#direction{ color:var(--muted) }
+
+/* Dimmed + frozen below the noise floor. A stale figure that still looks in tune is the main way
+   this class of app lies to you, so the dimming has to be unmistakable. */
+.stage.gated #figure{ opacity:.28; transition:opacity .25s ease }
+.stage.gated .hud{ opacity:.45 }
+.stage.searching #cents{ color:var(--muted) }
+
+/* ---- start / error overlay --------------------------------------------------------- */
+.overlay{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(2px);
+  text-align:center; padding:20px; border-radius:var(--radius);
+}
+.overlay[hidden]{ display:none }
+.overlay-inner{ max-width:34ch; display:flex; flex-direction:column; gap:14px; align-items:center }
+#overlay-msg{ font-size:15px; color:var(--ink) }
+.overlay-note{ font-size:12px; color:var(--muted) }
+.start{
+  appearance:none; border:0; border-radius:999px; cursor:pointer;
+  background:var(--accent); color:var(--bg); font:600 15px/1 system-ui, sans-serif;
+  padding:14px 26px; min-height:48px;
+}
+.overlay.error .start{ background:var(--sharp) }
+
+/* ---- per-string chips -------------------------------------------------------------- */
+.chips{ display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; flex:0 0 auto }
+.chip{
+  border:1px solid var(--line); border-radius:10px; padding:6px 4px; text-align:center;
+  background:var(--card); min-height:44px; display:flex; flex-direction:column; justify-content:center; gap:2px;
+}
+.chip.active{ border-color:var(--accent) }
+.chip b{ font:700 13px/1 system-ui, sans-serif }
+.chip span{ font:600 12px/1 ui-monospace, monospace; color:var(--muted); font-variant-numeric:tabular-nums }
+.chip.sharp span{ color:var(--sharp) }
+.chip.flat span{ color:var(--flat) }
+
+/* ---- build id: always visible, never dev-gated -------------------------------------- */
+.buildid{
+  position:fixed; right:calc(4px + env(safe-area-inset-right)); bottom:calc(2px + env(safe-area-inset-bottom));
+  font:500 9px/1 ui-monospace, monospace; color:var(--muted); opacity:.55; pointer-events:none; z-index:20;
+}
 
 /* Three-state theme toggle (auto/light/dark). Pushed to the right of the header. */
 .theme-toggle{
-  margin-left:auto; font:500 12px/1 system-ui, sans-serif; color:var(--muted);
+  font:600 12px/1 system-ui, sans-serif; color:var(--muted);
   background:transparent; border:1px solid var(--line); border-radius:999px;
-  padding:6px 12px; cursor:pointer; min-height:32px;   /* keep the tap target reasonable */
+  padding:8px 12px; cursor:pointer; min-height:34px;   /* keep the tap target reasonable */
+}
+
+/* ---- dev panel (?dev=1 only) --------------------------------------------------------- */
+/* Generated from Tuner.PARAMS. The two classes are deliberately NOT one list: a taste knob cannot
+   produce a wrong reading, a measurement knob can, and mixing them invites the second to be
+   treated like the first. */
+.dev{
+  position:fixed; inset:auto 0 0 0; max-height:72dvh; overflow-y:auto; z-index:30;
+  background:var(--card); border-top:1px solid var(--line);
+  padding:12px calc(12px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  font-size:12px;
+}
+.dev[hidden]{ display:none }
+.dev h3{ font:700 11px/1 system-ui, sans-serif; text-transform:uppercase; letter-spacing:.06em; margin:12px 0 6px }
+.dev h3:first-child{ margin-top:0 }
+.dev h3 em{ font-style:normal; font-weight:500; text-transform:none; letter-spacing:0; color:var(--muted) }
+.dev-row{ display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:6px 0; border-bottom:1px solid var(--line) }
+.dev-row label{ font-weight:600 }
+.dev-row output{ font:600 12px/1 ui-monospace, monospace; color:var(--accent) }
+.dev-row input[type=range]{ grid-column:1 / -1; width:100% }
+.dev-row .help{ grid-column:1 / -1; color:var(--muted); font-size:11px; line-height:1.35 }
+.dev-stats{ display:grid; grid-template-columns:repeat(auto-fit, minmax(84px, 1fr)); gap:6px; margin:8px 0 }
+.dev-stats div{ background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:6px 8px }
+.dev-stats b{ display:block; font:700 14px/1.2 ui-monospace, monospace; font-variant-numeric:tabular-nums }
+.dev-stats small{ color:var(--muted); font-size:10px }
+.dev-actions{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px }
+.dev-actions button{
+  appearance:none; border:1px solid var(--line); background:var(--bg); color:var(--ink);
+  border-radius:999px; padding:8px 12px; font:600 12px/1 system-ui, sans-serif; cursor:pointer; min-height:36px;
+}
+.dev-toggle{
+  position:fixed; left:calc(8px + env(safe-area-inset-left)); bottom:calc(6px + env(safe-area-inset-bottom));
+  z-index:31; appearance:none; border:1px solid var(--line); background:var(--card); color:var(--muted);
+  border-radius:999px; padding:6px 10px; font:600 11px/1 ui-monospace, monospace; cursor:pointer;
 }
 
 /* Target REAL touch devices — not just a narrow desktop window — when you want fixed phone sizing

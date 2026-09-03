@@ -235,6 +235,7 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.blend = 0;                          // 0 = f0 estimate, 1 = 2*f0 estimate
     this.useH2 = false;
     this.quantum = 0;
+    this.rec = null; this.recFill = 0;       // dev-only raw PCM capture (see onMessage "record")
     this.lastX = 0; this.lastY = 0; this.lastTh = 0; this.lastR = 0;
 
     this.sizeDetector();
@@ -257,9 +258,23 @@ class TunerProcessor extends AudioWorkletProcessor {
       if (lsqN !== this.s1.n) { this.s1 = new Slope(lsqN); this.s2 = new Slope(lsqN); }
       this.sizeDetector();
       this.retune();
+    } else if (m.type === "record") {
+      // Dev-only. Capture RAW mono PCM, not captured I/Q, so that the bandwidth and the
+      // demodulator itself stay variable under replay — which is the entire point of replaying.
+      // Accumulated here and posted ONCE (transferred, not copied): posting per-quantum would be
+      // ~375 messages a second to say nothing.
+      if (m.on) { this.rec = new Float32Array(Math.round(m.seconds * this.rate)); this.recFill = 0; }
+      else this.flushRecording();
     } else if (m.type === "reset") {
       this.locked = -1; this.cand = -1; this.candRuns = 0; this.resetEstimator();
     }
+  }
+
+  flushRecording() {
+    if (!this.rec) return;
+    const buf = this.rec.subarray(0, this.recFill).slice();   // trim, then hand off the copy
+    this.rec = null; this.recFill = 0;
+    this.port.postMessage({ rec: buf, sampleRate: this.rate }, [buf.buffer]);
   }
 
   // Detection block length, from the closest candidate pair (see DETECT_BINS_PER_GAP).
@@ -366,6 +381,12 @@ class TunerProcessor extends AudioWorkletProcessor {
     const input = inputs[0];
     const block = input && input[0];
     const len = block ? block.length : QUANTUM;
+
+    if (this.rec && block) {
+      const room = Math.min(len, this.rec.length - this.recFill);
+      if (room > 0) { this.rec.set(block.subarray(0, room), this.recFill); this.recFill += room; }
+      if (this.recFill >= this.rec.length) this.flushRecording();     // full: hand it over
+    }
 
     // Detection runs on the raw signal, in detN-sized blocks assembled across quanta.
     if (block && this.targets.length) {

@@ -181,3 +181,40 @@ test("pure vs equal fifths diverge by the documented amounts", () => {
 test("the 3.93-cent anchor is exactly one revolution per second at A440", () => {
   assert.ok(Math.abs(centsToHz(3.93, 440) - 1.0) < 0.001);
 });
+
+// --- self-test mode acceptance (?test=1&cents=3.93) ---------------------------------
+// The arithmetic above is necessary but not sufficient: what has to be true is that the FIGURE
+// turns once per second. That is the phasor angle `th` the render actually consumes, so measure
+// revolutions out of the posted messages rather than trusting the cents number to imply them.
+// The synthetic source here mirrors testSource() in tuner.js: 3 partials at 0, -6 and -12 dB.
+for (const rate of RATES) {
+  test(`[${rate}] self-test at +3.93 cents -> the figure turns 1.000 rev/s`, () => {
+    const t = violin();
+    const secs = 4;
+    const T = makeTuner({ rate, targets: t });
+    // 0 / -6 / -12 dB is amplitude 1 / 0.5 / 0.25, which is what `decay: 1` does NOT give —
+    // build it explicitly so this matches the shipped test source.
+    const f = t[2] * centsToRatio(3.93);
+    const n = Math.floor(secs * rate);
+    const sig = new Float32Array(n);
+    [0.3, 0.15, 0.075].forEach((a, k) => {
+      const w = (2 * Math.PI * f * (k + 1)) / rate;
+      for (let i = 0; i < n; i++) sig[i] += a * Math.sin(w * i);
+    });
+    T.feed(sig);
+
+    // Unwrap the posted angle over the settled tail and convert to revolutions per second.
+    const tail = T.settled(0.5);
+    let acc = 0, prev = tail[0].th;
+    for (const m of tail.slice(1)) {
+      let d = m.th - prev;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      acc += d; prev = m.th;
+    }
+    const msgRate = rate / 128 / 4;                       // messages per second
+    const revs = Math.abs(acc / (2 * Math.PI)) / ((tail.length - 1) / msgRate);
+    assert.ok(Math.abs(revs - 1.0) < 0.02, `figure turned ${revs.toFixed(4)} rev/s, want 1.000`);
+    assert.ok(Math.abs(settledCents(T) - 3.93) < 0.05, `cents=${settledCents(T)}`);
+  });
+}
