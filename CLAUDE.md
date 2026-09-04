@@ -193,6 +193,14 @@ the tree was dirty at stamp time. `scripts/stamp-build.sh --deploy` suppresses t
 - **While a reference tone sounds the mic hears OUR tone**, so the tuner would lock that string and
   report ~0.0 cents — indistinguishable from a perfectly tuned instrument. `paintEstimate` returns
   a reference state instead of a reading. Do not "fix" this by letting the number through.
+- **The reference outline is an ORBIT, not a target to match.** `targetGuide` draws
+  `x = cos(q*u), y = sin(p*u)` faintly behind the figure — a unit circle for the phasor and the
+  unison Lissajous, the string's p:q lattice for figure 2. What it honestly gives you is the centre,
+  the scale, and the lobe structure to expect. It is NOT "the shape when in tune": being in tune
+  makes the figure STAND STILL at whatever phase it happens to hold, and mode 1's in-tune ellipse
+  ranges from a straight line to a circle depending only on where the phase started. No copy may
+  say "match the outline". Drawn in `app.js`, not the worklet — static geometry from an integer
+  ratio needs no sampleRate and no DSP constant, so the estimation boundary is untouched.
 - **The figure's SHAPE means nothing about pitch — in `figureMode: 0`** (ADDENDUM §4). A 2:1 ratio
   traces a fixed limaçon. Shape is timbre, motion is error. No UI copy may imply otherwise.
 - **...but there are now two true-Lissajous modes, and in those the shape IS the string.** This was

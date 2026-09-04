@@ -190,6 +190,7 @@ function strokeCurve(pts, alpha, cents) {
 function drawCurveFrame() {
   const ctx = fig.ctx;
   clearFigure();
+  drawGuide(Tuner.engine.lastEstimate ? Tuner.engine.lastEstimate.s : -1);
   if (!fig.curve) return;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -201,12 +202,62 @@ function drawCurveFrame() {
   ctx.globalAlpha = 1;
 }
 
+// The faint reference the live figure lives ON. One formula covers all three modes:
+//
+//   x = cos(q*u),  y = sin(p*u)
+//
+// with p:q = 1:1 for the phasor and the unison Lissajous, and the string's ratio to the reference A
+// for mode 2. That gives the phasor's orbit (a unit circle), the widest-open in-tune ellipse, and
+// the canonical p:q lattice respectively.
+//
+// It is deliberately NOT "the shape to match", and no copy may call it that. Being in tune makes the
+// figure STATIONARY, not any particular shape: mode 1's in-tune ellipse is anything from a straight
+// line to a circle depending on where the phase happened to start, and mode 2's lattice sits at an
+// arbitrary rotation. What the guide honestly provides is the centre, the scale, and — in mode 2 —
+// the lobe structure to expect. ADDENDUM section 4.
+//
+// Computed here rather than in the worklet on purpose: it is static geometry from an integer ratio,
+// needs no sampleRate and no DSP constant, and posting a second curve on every message to avoid a
+// cosine on the main thread would be the wrong trade. The estimation boundary is untouched.
+const GUIDE_N = 512;
+function drawGuide(stringIdx) {
+  if (!Tuner.params.targetGuide) return;
+  const ctx = fig.ctx, P = projector();
+  const mode = Tuner.params.figureMode | 0;
+  let p = 1, q = 1;
+  if (mode === 2 && stringIdx >= 0) {
+    const r = Tuner.ratios()[stringIdx];
+    if (r) { p = r[0]; q = r[1]; }
+  }
+  ctx.save();
+  // --muted at low alpha rather than --line. --line is sized for 1px hairlines against a card and
+  // lands about 9% off the background in BOTH themes (#dcdad3 on #f4f3ef, #26302e on #0e1413),
+  // which disappears on a phone in daylight. --muted at 0.3 is roughly 16% in both — still clearly
+  // subordinate to the trace, still symmetric across themes. Read through getCssColor, never a
+  // literal, so a theme switch repaints it correctly.
+  ctx.globalAlpha = 0.3;
+  ctx.lineWidth = Math.max(1, fig.dpr);
+  ctx.strokeStyle = Theme.getCssColor("--muted") || "#8a8a8a";
+  ctx.beginPath();
+  for (let j = 0; j <= GUIDE_N; j++) {
+    const u = (2 * Math.PI * j) / GUIDE_N;
+    const x = Math.cos(q * u), y = Math.sin(p * u);
+    if (j === 0) ctx.moveTo(P.x(x, y), P.y(x, y));
+    else ctx.lineTo(P.x(x, y), P.y(x, y));
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawFrame() {
   if (!fig.ctx) return;
   if (fig.frozen) return;              // hold the last painted frame, untouched
   if (fig.kind === 1) return drawCurveFrame();
   const ctx = fig.ctx;
   clearFigure();
+  // Before the trail check: an empty stage with a reference ring reads as ready, an empty one reads
+  // as broken, and that is the difference on every launch.
+  drawGuide(Tuner.engine.lastEstimate ? Tuner.engine.lastEstimate.s : -1);
   if (fig.count < 2) return;
 
   const P = projector();
