@@ -504,15 +504,21 @@ function buildDevPanel() {
   // phone or anywhere else. The toggle is the only thing on screen until you ask for the rest.
   panel.style.display = "none";
 
+  // A sticky header, because the panel is fixed to the bottom of the viewport and COVERS the pill
+  // that opened it — so the pill cannot be used to close it again. Every way out of dev mode has to
+  // live inside the panel, and has to stay on screen while the panel scrolls.
+  const head = document.createElement("div");
+  head.className = "dev-head";
+  head.innerHTML = `<b>Dev</b>
+    <button type="button" id="dev-exit">Exit dev</button>
+    <button type="button" id="dev-close" aria-label="Collapse panel">Collapse</button>`;
+  panel.appendChild(head);
+
   const toggle = document.createElement("button");
   toggle.className = "dev-toggle";
   toggle.textContent = "dev";
   toggle.setAttribute("aria-expanded", "false");
-  toggle.onclick = () => {
-    const open = panel.style.display === "none";
-    panel.style.display = open ? "" : "none";
-    toggle.setAttribute("aria-expanded", String(open));
-  };
+  toggle.onclick = () => setPanelOpen(panel.style.display === "none");
   el("dev-slot").appendChild(toggle);
 
   // Live measurements. This is what turns the one unverifiable constant in the plan into a minimum
@@ -570,6 +576,14 @@ function buildDevPanel() {
     <button type="button" id="dev-reset">Reset params</button>`;
   panel.appendChild(actions);
   el("dev-sweep").onclick = sweepStrings;
+  el("dev-exit").onclick = exitDevMode;
+  el("dev-close").onclick = () => setPanelOpen(false);
+
+  const foot = document.createElement("div");
+  foot.className = "help";
+  foot.style.marginTop = "8px";
+  foot.textContent = "Collapse leaves the pill so you can reopen it. Exit dev removes the pill and restores normal behaviour — three taps on the build id brings it back.";
+  panel.appendChild(foot);
 
   el("dev-copy").onclick = () => copyText(diagnostics(), el("dev-copy"), "Copy diagnostics");
   el("dev-js").onclick = () => copyText(paramsAsJs(), el("dev-js"), "Copy as JS");
@@ -826,6 +840,42 @@ function download(blob, name) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+// Leave dev mode completely — not just collapse the panel. Collapsing leaves the pill on screen and
+// leaves devMode true, which keeps the reference-tone suppression switched OFF for the rest of the
+// session; that is a behaviour change that must not be something you can get stuck in. On an
+// installed PWA there is no URL bar to edit and no easy reload, so an in-app exit is the only way
+// back out.
+function setPanelOpen(open) {
+  const panel = el("dev");
+  panel.hidden = false;
+  panel.style.display = open ? "" : "none";
+  const pill = document.querySelector(".dev-toggle");
+  if (pill) pill.setAttribute("aria-expanded", String(open));
+}
+
+function exitDevMode() {
+  devMode = false;
+  if (devStatsTimer) { clearInterval(devStatsTimer); devStatsTimer = null; }
+  sweepRows = null;
+  Tuner.stopReference();
+
+  const panel = el("dev");
+  panel.innerHTML = "";              // emptied, so the gesture below rebuilds it fresh
+  panel.hidden = true;
+  panel.style.display = "";
+  const pill = document.querySelector(".dev-toggle");
+  if (pill) pill.remove();
+
+  // Make the exit survive a reload: otherwise ?dev=1 sitting in the URL reopens the panel on the
+  // next launch and "exit" would look broken.
+  try {
+    const u = new URL(location.href);
+    if (u.searchParams.has("dev")) { u.searchParams.delete("dev"); history.replaceState(null, "", u); }
+  } catch (e) { /* history unavailable */ }
+
+  onReferenceChange();               // restore the non-dev readout state
+}
+
 // An installed PWA has NO URL BAR, so ?dev=1 cannot be typed once the app is on the home screen —
 // which is exactly where it needs calibrating against a real instrument. Three taps on the build id
 // opens the panel. Deliberately obscure (it must not be reachable by accident) but not hidden: the
@@ -843,11 +893,7 @@ function wireDevGesture() {
     if (taps < 3) return;
     taps = 0;
     if (!el("dev").hasChildNodes()) buildDevPanel();
-    const panel = el("dev");
-    panel.hidden = false;
-    panel.style.display = panel.style.display === "none" ? "" : "none";
-    const t = document.querySelector(".dev-toggle");
-    if (t) t.setAttribute("aria-expanded", String(panel.style.display !== "none"));
+    setPanelOpen(el("dev").style.display === "none");
   });
 }
 

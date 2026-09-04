@@ -150,6 +150,21 @@ a{ color:var(--accent) }
   font-size:12px;
 }
 .dev[hidden]{ display:none }
+/* Sticky so the way out stays on screen while the panel scrolls. The negative side margins let it
+   span the panel's padding; the top one closes the gap above it. */
+.dev-head{
+  position:sticky; top:0; z-index:2;
+  display:flex; align-items:center; gap:8px;
+  margin:-12px -12px 10px; padding:10px 12px;
+  background:var(--card); border-bottom:1px solid var(--line);
+}
+.dev-head b{ font:700 11px/1 system-ui, sans-serif; text-transform:uppercase; letter-spacing:.06em }
+.dev-head button{
+  appearance:none; border:1px solid var(--line); background:var(--bg); color:var(--ink);
+  border-radius:999px; padding:7px 12px; font:600 11px/1 system-ui, sans-serif; cursor:pointer; min-height:34px;
+}
+#dev-exit{ margin-left:auto; border-color:var(--sharp); color:var(--sharp) }
+
 .dev h3{ font:700 11px/1 system-ui, sans-serif; text-transform:uppercase; letter-spacing:.06em; margin:12px 0 6px }
 .dev h3:first-child{ margin-top:0 }
 .dev h3 em{ font-style:normal; font-weight:500; text-transform:none; letter-spacing:0; color:var(--muted) }

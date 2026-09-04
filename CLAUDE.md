@@ -53,6 +53,16 @@ the app reports ~0.0 cents off its own tone and looks like a perfectly tuned ins
 Nothing may be `position: fixed` over the chips row — they are buttons now, and an overlay there
 swallows taps meant for a control. The dev pill lives in `.statusrow` for exactly this reason.
 
+**The open dev panel covers the pill AND the build id** (it is fixed to the bottom 72dvh, and the
+status row sits inside that). So every way OUT of dev mode must live inside the panel itself, in the
+sticky `.dev-head` — for one release it did not, and opening the panel on a phone was a dead end
+with no way back short of relaunching. `setPanelOpen()` is the single owner of open/closed; the
+pill, the triple-tap gesture and the header's Collapse all go through it.
+
+`Exit dev` (not Collapse) is the full exit: it removes the pill, empties the panel, clears
+`devMode` — which restores reference-tone suppression — and strips `?dev=1` from the URL so the
+exit survives a reload.
+
 **Three taps on the build id opens the dev panel.** An installed PWA has no URL bar, so `?dev=1`
 cannot be typed once it is on the home screen — which is exactly where it needs calibrating against
 a real instrument. `?dev=1` still works in a tab.
