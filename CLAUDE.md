@@ -264,10 +264,28 @@ specificity as `.stage.live .hud` and comes later, which is why the gated rule i
 
 ## Open
 
-- **`bwCoef` (0.06) is still a guess.** It is the one number the plan admits cannot be derived. Use
-  `?dev=1`: record 15 s of a real bowed note, replay it, and sweep the bandwidth against the jitter
-  / lock-drop / gate-close readouts. Take the lowest value whose jitter stops improving but which
-  doesn't drop lock under vibrato, then hardcode it and delete the knob.
+- **`bwCoef` (0.06) was a guess and is now MEASURED — the guess was right. Do not narrow it.**
+  Swept against five real violin takes. Median per-second cents SD, steady passages:
+
+  | bwCoef | 0.02 | 0.03 | 0.04 | 0.06 | 0.09 | 0.13 |
+  |---|---|---|---|---|---|---|
+  | capture | ±34c | ±51c | ±68c | ±101c | ±149c | — |
+  | GDAE | 1.68 | 1.78 | 1.81 | 1.85 | 1.89 | 1.99 |
+  | Tune G | 2.10 | 2.61 | 2.71 | 4.19 | 14.37 | 18.33 |
+  | Tune E | 1.69 | 1.62 | 1.94 | 2.07 | 3.71 | 3.71 |
+
+  Read alone that says "narrow it to 0.03", and that is a trap. Jitter is measured on STEADY notes;
+  the tuning workflow is the opposite of steady. Against a real −94-cent peg turn, at the moment the
+  pitch was falling fastest the same instant read **−34 at bwCoef 0.02, −59 at 0.03, −68 at 0.06**
+  against a true −94: a narrower filter has a longer group delay, so it lags exactly when you are
+  turning a peg and watching the number. Going wider is worse in the other direction — 0.09 puts
+  Tune G's jitter at 14 cents. 0.06 sits in the trough of both costs, and its ±101-cent capture is
+  the right match for `outOfRangeCents` (120). **The knob stays** for one reason only: none of these
+  takes contain vibrato, which is the case the plan says decides it.
+- **`lsqSec` (0.5) is confirmed too, and 0.2 is actively worse** — Tune E 2.07 → 4.74, Tune A 4.42 →
+  11.10. A shorter window feels more responsive and measures noisier; the lag it buys back is about
+  `lsqSec/2`, which is ~0.25 s at the default. Verified directly: during a peg sweep the reading
+  trails in whichever direction the pitch is moving and agrees to 0.4 cents once it settles.
 - Cello C2 detection on a real phone mic is unverified — the fundamental may be rolled off. The
   harmonic sum should carry it; the **loopback sweep's `level` column** is how to check, and
   `detHarmonics` is the knob if it doesn't.
@@ -276,10 +294,14 @@ specificity as `.stage.live .hud` and comes later, which is why the gated rule i
   are **deliberately not in the repo** (`recordings/` is gitignored — it is audio of a person, and
   this is public). So the confirmation is real but *not reproducible from a clean checkout*: ask for
   a recording rather than assuming one is on disk, and use `scripts/analyze-recording.mjs`.
-- **Cents readings during tuning show excursions of 40–90 cents** (seen in local tuning takes) between
-  otherwise steady stretches. Some of that is real — a peg being turned genuinely moves the pitch —
-  but not obviously all of it, and it has not been separated from bow noise or from the demodulator
-  losing a slackened string. This is the next thing to chase, and the recordings are already here.
+- ~~Cents excursions of 40–90 cents during tuning~~ — **resolved: they are real, and the estimator
+  tracks them correctly.** Checked against an independent pitch tracker (a wide harmonic comb, no
+  demodulator, no lock, no ±150-cent band, so it shares no machinery with the thing under test). On
+  a peg-tuned A the tracker and the app agree throughout a −94-cent excursion; on an E tuned with
+  the fine tuner ONLY, both stay inside +17/−13 cents for the whole take. The split between those
+  two is the confirmation: the big swings appear exactly where a peg was turned and nowhere else.
+  When writing such a check, keep the comb's scan under ±351 cents — a wider one locks the
+  neighbouring fifth and reports a confident −702.
 - The two Lissajous modes are **unjudged on a real instrument** — the choice between them and the
   phasor is a taste call that has to be made while actually tuning something. Once made, bake it in
   and delete the other two.
