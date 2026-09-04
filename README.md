@@ -49,6 +49,7 @@ npm run serve                 # static server on :8137 (getUserMedia needs local
 npm test                      # DSP suite + service-worker suite + precache lint
 npm run check:browser         # real Chromium via ?test=1 — needs `npm install` and a server
 npm run check:offline         # prime the cache, go offline, confirm it still runs
+npm run shot -- --theme light # screenshot the running app (see scripts/shot.mjs for flags)
 ```
 
 The DSP suite needs nothing installed. The two `check:` scripts drive a real browser, so they need

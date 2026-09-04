@@ -9,3 +9,7 @@ __pycache__/
 
 # Claude Code: track .claude/settings.json (team hooks), ignore the ephemeral working dir.
 .claude/.cc-writes/
+
+# scripts/shot.mjs default output — a working artifact, never committed
+shot.png
+*.f32

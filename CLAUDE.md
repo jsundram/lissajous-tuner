@@ -113,12 +113,70 @@ the tree was dirty at stamp time. `scripts/stamp-build.sh --deploy` suppresses t
 - The zero-gain `GainNode` to `destination` is required, not decorative — Safari stops pulling an
   unconnected worklet and `process()` silently stops.
 
+## Working on look, feel and behaviour
+
+**The loop.** `?test=1&cents=N` makes the figure deterministic — a synthetic tone a fixed number of
+cents off — so a change is comparable across runs and needs no instrument. `--cents` also sets how
+the figure *reads*: 3.93 is one revolution per second (slow, smooth), 50 is fast.
+
+```sh
+npm run serve                                             # :8137, in another shell
+npm run shot -- --theme light --cents 3.93                # -> shot.png
+npm run shot -- --w 375 --h 667 --instrument cello --dev
+npm run shot -- --engine webkit                           # closest available thing to iOS Safari
+```
+
+`shot.mjs` exits non-zero on any page error, so a broken build cannot quietly produce a nice
+picture. Use `--settle` if a cold browser start hasn't filled the trail yet.
+
+**Design tokens** are the only place colour lives: `--bg --card --ink --muted --line --accent
+--trace --sharp --flat` plus `--radius --maxw`, defined three times in `styles.css` (`:root`, the
+`prefers-color-scheme: dark` block, and `:root[data-theme="dark"]`). **Keep the two dark blocks in
+sync.** `sw.js`'s `offlineFallback()` hardcodes the palette by necessity — it renders when
+`styles.css` is unreachable — so a palette change means editing it too.
+
+**The canvas bakes colours into JS**, which is the classic theme trap here: `traceColor()` and
+`bgColor()` read `Theme.getCssColor()`, whose cache `theme.js` clears *before* calling subscribers.
+So anything that draws must repaint on `onThemeChange`, and must read colours through
+`getCssColor`, never a literal.
+
+**Layout ownership.** `#tuner` is a `100dvh` flex column: `.bar` (three controls) / `.stage` /
+`.statusrow` (dev pill + build id) / `.chips`. `.stage` holds the canvas, `.hud` (corner overlays,
+`pointer-events:none`) and `.overlay` (start / mic-error). Two load-bearing details: `.stage` needs
+`min-height:0` or the flex child refuses to shrink and pushes the chips off-screen, and `.hud` is
+hidden until `.stage.live` — empty captions before Start read as a broken screen.
+
+**Adding a parameter is one line** in `tuner.js PARAMS`; the panel is generated from it. `cls:
+"taste"` ships and persists to localStorage, `cls: "measure"` is calibrate-then-bake, and
+`worklet: true` forwards it to the DSP. Do not add a knob that can change the reported number
+without putting it in `measure`.
+
+**Behaviour that must not be "tidied away".** Each of these looks like a bug and is not:
+
+- The figure **freezes** (does not decay) when gated or searching. A decaying figure erases the
+  evidence of the last real reading; a frozen one that still looks in tune is why it also dims.
+- Outside ±120 cents the app shows **no number at all**. That is deliberate (ADDENDUM §3).
+- A reference tone shows a **reference state, not a reading**, outside dev mode. The mic is hearing
+  the app's own tone and would report ~0.0 cents.
+- The figure is **near-circular on a pure tone**. Dimple depth is `overlayWeight * (amp2/amp1)`, so
+  shape follows the instrument's partials — that is the honest behaviour, not a missing feature.
+
+**Overlay invariants**, learned three times the hard way: nothing `position: fixed` over `.chips`
+(they are buttons); every exit from dev mode lives inside the panel, because the open panel covers
+the pill and the build id; and watch cascade order — `.stage.live.gated .hud` has the same
+specificity as `.stage.live .hud` and comes later, which is why the gated rule is scoped to
+`.live`.
+
 ## Open
 
 - **`bwCoef` (0.06) is still a guess.** It is the one number the plan admits cannot be derived. Use
   `?dev=1`: record 15 s of a real bowed note, replay it, and sweep the bandwidth against the jitter
   / lock-drop / gate-close readouts. Take the lowest value whose jitter stops improving but which
   doesn't drop lock under vibrato, then hardcode it and delete the knob.
-- Cello C2 detection on a real phone mic is unverified — the fundamental may be rolled off. Read
-  the `detH2Weight` warning above before reaching for it.
+- Cello C2 detection on a real phone mic is unverified — the fundamental may be rolled off. The
+  harmonic sum should carry it; the **loopback sweep's `level` column** is how to check, and
+  `detHarmonics` is the knob if it doesn't.
+- The open-G fix was derived from the physics and synthetic partial profiles, **not confirmed on a
+  real violin**. The loopback sweep is the confirmation; a mismatch in its `hear` column is the
+  failure reappearing.
 - Not built: the 2×2 parameter-comparison grid from the plan's visualization section.
