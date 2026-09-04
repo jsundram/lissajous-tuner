@@ -279,6 +279,30 @@ for (const rate of [48000, 16000]) {
   });
 }
 
+// --- 13: the octave, found on a real recording ---------------------------------------
+// A violinist playing D5 (a stopped note on the A string) while the tuner was locked to the open D
+// got "D4, about in tune" — for a note an OCTAVE above it. D5 puts energy on D4's k=2 and k=4 and
+// NOTHING on its k=3, which is exactly the signature the odd-harmonic guard exists to catch; the
+// guard was there, but it only protected the ESTIMATE, while the widened gate (either demodulator
+// leg may open it, so a mic-rolled-off G still reads) let 2*f0 alone open the gate underneath it.
+//
+// The second half of this is the demodulator's start-up transient: a zeroed 4-pole cascade struck
+// by a strong out-of-band tone rings hard enough to clear the gate for a few messages, which leaked
+// +50 cents on a tone 250 cents off. Hence SETTLE_TC. Both halves are asserted here.
+for (const rate of [44100, 48000, 16000]) {
+  test(`[${rate}] a note an octave above an open string is never reported as that string`, () => {
+    const t = violin();
+    // 2*D4 with its own harmonics: lands on D4's even members only, never its k=3.
+    const T = makeTuner({ rate, targets: t })
+      .feed(tone(2 * t[1], SECONDS, rate, { amps: [0.30, 0.15, 0.10, 0.06] }));
+    for (const m of T.settled()) {
+      assert.ok(!(m.s === 1 && m.st === 1 && m.c !== null && Math.abs(m.c) < 60),
+        `reported D4 at ${m.c} cents for a tone an octave above it`);
+    }
+    assertNoNaN(T);
+  });
+}
+
 // --- pinning ------------------------------------------------------------------------
 // Tuning by fifths means bowing the NEIGHBOUR for much of the session. Measured on a real "tune the
 // G string" recording, the app read D4 for 18 of 27 seconds — correctly, because the D really was

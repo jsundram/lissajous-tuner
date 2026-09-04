@@ -41,6 +41,13 @@ const lastByString = {};
 const TRAIL_CAP = 6000;      // ring capacity: ~4 s at 16 points x ~94 messages/s
 const TRAIL_CHUNKS = 28;     // constant-alpha polylines per frame (see drawFrame)
 const TRAIL_FLOOR = 0.02;    // drop a point once it is this faint — invisible, and unbounded otherwise
+// Consecutive trail points normally arrive ~0.7 ms apart (16 per message at ~94 Hz). A larger gap
+// than this means capture STOPPED and restarted — the gate closed while a note died away, or the
+// lock moved — and the phasor is somewhere else entirely by the time it resumes. Joining across
+// that draws a chord straight through the middle of the figure, which is what a real G-string
+// capture is full of. The trail must break instead: the two arcs are not continuous and drawing
+// them as if they were invents a path the signal never took.
+const TRAIL_BREAK_MS = 50;
 
 // The Lissajous modes do not produce a trail at all: each message carries a whole CLOSED CURVE
 // which replaces the last one, so there is nothing to accumulate. What makes the error readable
@@ -236,7 +243,14 @@ function drawFrame() {
     ctx.beginPath();
     let j = ringIdx(a0);
     ctx.moveTo(sx(j), sy(j));
-    for (let i = a0 + 1; i < a1; i++) { j = ringIdx(i); ctx.lineTo(sx(j), sy(j)); }
+    let prevT = fig.bt[j];
+    for (let i = a0 + 1; i < a1; i++) {
+      j = ringIdx(i);
+      const t = fig.bt[j];
+      if (t - prevT > TRAIL_BREAK_MS) ctx.moveTo(sx(j), sy(j));   // capture restarted: lift the pen
+      else ctx.lineTo(sx(j), sy(j));
+      prevT = t;
+    }
     ctx.stroke();
   }
   ctx.globalAlpha = 1;

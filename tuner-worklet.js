@@ -55,6 +55,11 @@ const LPF_SECTIONS = 4;     // ADDENDUM section 2 — a single pole is not enoug
 // twitchy lock on a flat string and sends you chasing the bandwidth knob instead.
 const CASCADE_SCALE = 2.3;
 
+// Time constants of settling to wait after the demodulator is reset before believing its output.
+// Every string change zeroes the cascade, so this is also what stops a wrong number flashing on
+// screen at the moment the lock moves.
+const SETTLE_TC = 8;
+
 // Detection block sizing. The plan fixed this at 1024 samples (~47 Hz at 48k), which is fine for
 // violin (closest pair G3->D4, 97.8 Hz) but NOT for cello: C2 and G2 are only 32.6 Hz apart, so a
 // 47 Hz bin cannot separate them at any hysteresis setting. Size the block from the actual
@@ -332,6 +337,8 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.starved = false;                    // f0 below the gate while 2*f0 is not: mic rolloff
     this.unattrRun = 0;                      // consecutive messages of loud-but-unattributed input
     this.gateShut = true;                    // is the locked string currently producing nothing?
+    this.settle = 0;                         // samples left before the demodulator output is usable
+    this.settleSamples = 0;
     this.lastX = 0; this.lastY = 0; this.lastTh = 0; this.lastR = 0;
 
     this.sizeDetector();
@@ -452,6 +459,13 @@ class TunerProcessor extends AudioWorkletProcessor {
     const bw = Math.min(this.cfg.bwMax, Math.max(this.cfg.bwMin, this.cfg.bwCoef * f0));
     this.d1.tune(f0, bw);
     this.d2.tune(2 * f0, 2 * bw);
+    // How long the cascade needs after a reset before its output means anything. A zeroed 4-pole
+    // filter struck by a strong OUT-OF-BAND tone rings: the transient briefly clears the noise gate
+    // even though the signal is nowhere near f0, and the estimator dutifully reports whatever the
+    // ringing looks like. Caught as +50 cents on a tone 250 cents off — the exact class of small,
+    // plausible, wrong number that ADDENDUM section 3 exists to prevent. SETTLE_TC time constants
+    // of the per-section cutoff, in samples.
+    this.settleSamples = Math.ceil((SETTLE_TC * this.rate) / (2 * Math.PI * CASCADE_SCALE * bw));
   }
 
   // Called on an ACTUAL string change only — never on a redundant detection result. Resetting the
@@ -463,7 +477,14 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.s1.reset(); this.s2.reset();
     this.blend = 0; this.useH2 = false;
     this.env2 = 0; this.starved = false;
-    this.retune();
+    // Drop the octave guard's evidence along with everything else. It is scored PER CANDIDATE, so a
+    // freshly re-locked string would otherwise inherit the previous block's verdict for its index —
+    // and the starved path, which is the one thing allowed to open the gate on 2*f0 alone, would run
+    // on a stale "yes". Measured as three messages of a wrong number leaking out per re-lock.
+    // Absent evidence the answer must be no; the next detection block re-establishes it in ~40 ms.
+    this.odd3 = null;
+    this.retune();                  // recomputes settleSamples for the new string...
+    this.settle = this.settleSamples || 0;   // ...and this is the countdown itself
   }
 
   // Score every candidate over one detection block and apply the 6 dB x 3 blocks hysteresis.
@@ -622,6 +643,8 @@ class TunerProcessor extends AudioWorkletProcessor {
       }
     }
 
+    if (this.settle > 0) this.settle -= len;
+
     const amp1 = this.locked >= 0 ? this.d1.mag : 0;
     const amp2 = this.locked >= 0 ? this.d2.mag : 0;
 
@@ -700,7 +723,13 @@ class TunerProcessor extends AudioWorkletProcessor {
     // 2*f0 leg happily reports an octave-wrong reading with full confidence.
     this.starved = amp1 < cfg.gateAmp && amp2 >= cfg.gateAmp
       && !!(this.odd3 && this.locked >= 0 && this.odd3[this.locked]);
-    const gated = amp1 < cfg.gateAmp && amp2 < cfg.gateAmp;
+    // The 2*f0 leg may only open the gate through `starved`, i.e. only once the octave guard has
+    // passed. Letting amp2 open it on its own is the same octave hole in a new place: a violin
+    // playing D5 puts energy on D4's k=2 and k=4 and nothing on its k=3, so the D4 demodulator sees
+    // a huge 2*f0 and a silent f0 — and the app reported "D4, about in tune" for a note an OCTAVE
+    // above it. Caught on a real recording; the narrower gate this replaced had been hiding it.
+    // Settling counts as gated: no reading, and the figure freezes rather than drawing the ringing.
+    const gated = this.settle > 0 || (amp1 < cfg.gateAmp && !this.starved);
     this.gateShut = gated;                   // read by runDetection (see the hysteresis bypass)
     let st, cents = null;
 

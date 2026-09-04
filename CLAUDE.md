@@ -154,6 +154,16 @@ the tree was dirty at stamp time. `scripts/stamp-build.sh --deploy` suppresses t
 - **Never score a bare 2·f0 octave probe.** `G2 = 1.5·C2` means `2·G2 = 3·C2` exactly, so it lands
   on the third partial of the string below. The comb is the principled version: requiring the whole
   series to line up removes that degeneracy.
+- **The 2·f0 leg may only open the gate THROUGH the octave guard, never beside it.** Guarding the
+  estimate is not enough: a violin playing D5 while locked to the open D read "D4, about in tune",
+  an octave out, because amp2 alone was allowed to open the gate. `gated` is
+  `amp1 < gateAmp && !starved`, and `starved` carries the guard. Found on a real recording, not by
+  reasoning — the narrower gate this replaced had been hiding it by accident.
+- **Wait `SETTLE_TC` time constants after any demodulator reset before believing the output.** A
+  zeroed 4-pole cascade struck by a strong OUT-OF-BAND tone rings enough to clear the noise gate,
+  and the estimator reports what the ringing looks like: +50 cents on a tone 250 cents off. Since
+  every string change resets the cascade, this is also what stops a wrong number flashing on screen
+  as the lock moves.
 - **The gate is on EITHER demodulator leg, and the 2·f0 leg needs an octave guard.** A phone mic can
   put a plainly-sounding open G's fundamental under `gateAmp` while its second partial is 20 dB
   above it; gating on `amp1` alone reported that as silence. So when f0 is starved and 2·f0 is not,
@@ -280,8 +290,12 @@ specificity as `.stage.live .hud` and comes later, which is why the gated rule i
   against a true −94: a narrower filter has a longer group delay, so it lags exactly when you are
   turning a peg and watching the number. Going wider is worse in the other direction — 0.09 puts
   Tune G's jitter at 14 cents. 0.06 sits in the trough of both costs, and its ±101-cent capture is
-  the right match for `outOfRangeCents` (120). **The knob stays** for one reason only: none of these
-  takes contain vibrato, which is the case the plan says decides it.
+  the right match for `outOfRangeCents` (120).
+
+  The plan wanted the lower bound decided by "does it drop lock under vibrato", and that turns out
+  to be **the wrong question for this app**: nobody tunes with vibrato. The bound that matters is
+  peg-turn lag, which is measured above and points the same way. Treat bwCoef as settled unless the
+  app ever becomes a while-you-play monitor rather than a tuner, which would bring vibrato back.
 - **`lsqSec` (0.5) is confirmed too, and 0.2 is actively worse** — Tune E 2.07 → 4.74, Tune A 4.42 →
   11.10. A shorter window feels more responsive and measures noisier; the lag it buys back is about
   `lsqSec/2`, which is ~0.25 s at the default. Verified directly: during a peg sweep the reading
