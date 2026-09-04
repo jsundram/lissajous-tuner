@@ -13,3 +13,14 @@ __pycache__/
 # scripts/shot.mjs default output — a working artifact, never committed
 shot.png
 *.f32
+
+# Instrument recordings. Deliberately NOT committed: they are audio of a person playing, and this
+# repo is public. They are real ground truth and worth keeping locally — scripts/analyze-recording.mjs
+# replays any of them through the shipping DSP — but a future session cannot assume they exist.
+recordings/
+
+# Screen recordings of the app under test. Useful for a session, far too big for the repo — a
+# 35 s capture is 64 MB. Run them through scripts/analyze-recording.mjs and commit the finding,
+# not the video.
+*.mp4
+*.mov

@@ -182,7 +182,27 @@ a{ color:var(--accent) }
 .dev-sweep table{ width:100%; border-collapse:collapse; font:500 11px/1.4 ui-monospace, monospace; font-variant-numeric:tabular-nums }
 .dev-sweep th{ text-align:left; color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); padding:3px 4px }
 .dev-sweep td{ padding:3px 4px; border-bottom:1px solid var(--line) }
+/* A pinned string is a MODE — detection is off — so it has to be unmistakable at a glance from
+   across a music stand, not a subtle tint. */
+.chip.pinned{ border-color:var(--accent); box-shadow:inset 0 0 0 2px var(--accent) }
+
 .dev-sweep tr.bad td{ color:var(--sharp) }
+
+/* The detection table shares the sweep table's look — same job, live rather than on demand. */
+.dev-det table{ width:100%; border-collapse:collapse; font:500 11px/1.4 ui-monospace, monospace; font-variant-numeric:tabular-nums }
+.dev-det th{ text-align:left; color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); padding:3px 4px }
+.dev-det td{ padding:3px 4px; border-bottom:1px solid var(--line) }
+.dev-det tr.win td{ color:var(--accent) }
+.dev-det tr.on td{ font-weight:700 }
+
+/* Collapsible so it can be read once and folded away; open on first build because the whole point
+   is that someone who has never seen this panel is holding an instrument in front of it. */
+.dev-guide{ border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:8px 0; background:var(--bg) }
+.dev-guide summary{ font:700 11px/1 system-ui, sans-serif; text-transform:uppercase; letter-spacing:.06em; cursor:pointer }
+.dev-guide ol{ margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:11px; line-height:1.5 }
+.dev-guide li{ margin-bottom:6px }
+.dev-guide li b{ color:var(--ink) }
+.dev-guide li em{ font-style:normal; color:var(--ink); font-weight:600 }
 .dev-sweep tr.bad b{ font-weight:700 }
 
 .dev-actions{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px }

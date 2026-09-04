@@ -42,8 +42,19 @@ const TRAIL_CAP = 6000;      // ring capacity: ~4 s at 16 points x ~94 messages/
 const TRAIL_CHUNKS = 28;     // constant-alpha polylines per frame (see drawFrame)
 const TRAIL_FLOOR = 0.02;    // drop a point once it is this faint — invisible, and unbounded otherwise
 
+// The Lissajous modes do not produce a trail at all: each message carries a whole CLOSED CURVE
+// which replaces the last one, so there is nothing to accumulate. What makes the error readable
+// there is the curve's motion between frames, and a single stroke shows none of it — so keep a few
+// spaced snapshots and draw them behind, faintest first. The spacing is in TIME, not messages: at
+// ~94 messages a second, six consecutive ones span 60 ms and would sit exactly on top of each other.
+const CURVE_GHOSTS = 5;
+const CURVE_GHOST_MS = 90;
+
 const fig = {
   canvas: null, ctx: null, w: 0, h: 0, dpr: 1,
+  kind: 0,                     // 0 = trail (phasor), 1 = closed curve (Lissajous)
+  curve: null, curveC: null,   // the current closed curve and the cents that coloured it
+  ghosts: [], lastGhost: 0,
   // A ring buffer of plain typed arrays rather than an array of {x,y,c,t} objects: at ~1500 points
   // a second, allocating an object per point is real garbage on the render path.
   bx: new Float32Array(TRAIL_CAP), by: new Float32Array(TRAIL_CAP),
@@ -62,7 +73,7 @@ function trailPush(x, y, c, t) {
   fig.head = (fig.head + 1) % TRAIL_CAP;
   if (fig.count < TRAIL_CAP) fig.count++;
 }
-function trailClear() { fig.head = 0; fig.count = 0; }
+function trailClear() { fig.head = 0; fig.count = 0; fig.curve = null; fig.ghosts.length = 0; }
 
 // The knob is a per-frame alpha, so convert it to a per-second decay constant at a nominal 60 fps.
 // Keeping the knob in the plan's units means a value calibrated on one device still means the same
@@ -112,6 +123,24 @@ function pushPoint(m) {
   fig.frozen = false;
   const t = performance.now();
   const path = m.p;
+
+  // A closed curve REPLACES rather than appends. The worklet says which kind it sent, so this
+  // never has to be inferred from the parameter — a message posted before a mode change still
+  // renders as whatever it actually is.
+  if (m.fk === 1) {
+    if (fig.kind !== 1) { trailClear(); fig.kind = 1; }
+    if (path && path.length >= 4) {
+      if (fig.curve && t - fig.lastGhost > CURVE_GHOST_MS) {
+        fig.ghosts.push(fig.curve);
+        if (fig.ghosts.length > CURVE_GHOSTS) fig.ghosts.shift();
+        fig.lastGhost = t;
+      }
+      fig.curve = path;
+      fig.curveC = m.c;
+    }
+    return;
+  }
+  if (fig.kind !== 0) { trailClear(); fig.kind = 0; }
   if (path && path.length >= 2) {
     // Spread the points across the message interval so the decay ramps smoothly rather than in
     // 16-point steps. dt is tiny (~0.7 ms) but the arithmetic is free.
@@ -125,17 +154,55 @@ function pushPoint(m) {
   }
 }
 
+// One place that turns a normalized (x, y) into canvas coordinates, shared by both renderers.
+// y is negated: the worklet works in maths orientation, the canvas in screen orientation.
+function projector() {
+  const cx = fig.w / 2, cy = fig.h / 2;
+  const R = Math.min(fig.w, fig.h) * 0.34;
+  const rot = (Tuner.params.orientation * Math.PI) / 180;
+  const cos = Math.cos(rot), sin = Math.sin(rot);
+  return {
+    x: (x, y) => cx + R * (x * cos - y * sin),
+    y: (x, y) => cy - R * (x * sin + y * cos),
+  };
+}
+
+function strokeCurve(pts, alpha, cents) {
+  const ctx = fig.ctx, P = projector();
+  const n = pts.length / 2;
+  if (n < 2) return;
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = traceColor(cents);
+  ctx.beginPath();
+  ctx.moveTo(P.x(pts[0], pts[1]), P.y(pts[0], pts[1]));
+  for (let i = 1; i < n; i++) ctx.lineTo(P.x(pts[i * 2], pts[i * 2 + 1]), P.y(pts[i * 2], pts[i * 2 + 1]));
+  ctx.closePath();                     // it IS a closed curve; leaving the seam open reads as a gap
+  ctx.stroke();
+}
+
+function drawCurveFrame() {
+  const ctx = fig.ctx;
+  clearFigure();
+  if (!fig.curve) return;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Tuner.params.strokeWidth * fig.dpr;
+  for (let i = 0; i < fig.ghosts.length; i++) {
+    strokeCurve(fig.ghosts[i], 0.10 + (0.28 * i) / Math.max(1, fig.ghosts.length), fig.curveC);
+  }
+  strokeCurve(fig.curve, 1, fig.curveC);
+  ctx.globalAlpha = 1;
+}
+
 function drawFrame() {
   if (!fig.ctx) return;
   if (fig.frozen) return;              // hold the last painted frame, untouched
+  if (fig.kind === 1) return drawCurveFrame();
   const ctx = fig.ctx;
   clearFigure();
   if (fig.count < 2) return;
 
-  const cx = fig.w / 2, cy = fig.h / 2;
-  const R = Math.min(fig.w, fig.h) * 0.36;
-  const rot = (Tuner.params.orientation * Math.PI) / 180;
-  const cos = Math.cos(rot), sin = Math.sin(rot);
+  const P = projector();
   const k = decayPerSec();
   const now = performance.now();
   const maxAge = (-Math.log(TRAIL_FLOOR) / k) * 1000;
@@ -149,9 +216,8 @@ function drawFrame() {
   ctx.lineJoin = "round";
   ctx.lineWidth = Tuner.params.strokeWidth * fig.dpr;
 
-  // y is negated: the worklet works in maths orientation, the canvas in screen orientation.
-  const sx = (j) => cx + R * (fig.bx[j] * cos - fig.by[j] * sin);
-  const sy = (j) => cy - R * (fig.bx[j] * sin + fig.by[j] * cos);
+  const sx = (j) => P.x(fig.bx[j], fig.by[j]);
+  const sy = (j) => P.y(fig.bx[j], fig.by[j]);
 
   // Stroke the trail as TRAIL_CHUNKS constant-alpha polylines rather than one path per segment.
   // With ~3200 live points a per-segment stroke would be 3200 draw calls a frame; this is 28, and
@@ -212,10 +278,19 @@ function paintEstimate(m) {
   const targets = Tuner.targets();
   const nameEl = el("string-name");
 
-  if (m.s >= 0 && m.s < names.length) {
+  // While the GATE is shut we are reporting nothing, so do not relabel. Room noise between notes is
+  // loud enough that the detector's winner wanders — measured on a real G-D-A-E recording, the lock
+  // flipped D4/G3 several times in the gaps — and a big letter changing while the player is not
+  // playing reads as the app guessing. The lock itself is free to wander; it re-decides within a
+  // block or two of the next note. What must not churn is the label, for the same reason the figure
+  // freezes rather than decays: hold the last real reading, and show nothing new until there is
+  // something new to show.
+  if (m.st === 0 && nameEl.textContent && nameEl.textContent !== "—") {
+    /* gated: hold whatever the last real reading labelled */
+  } else if (m.s >= 0 && m.s < names.length && m.st !== 2) {
     nameEl.textContent = names[m.s];
     el("target-hz").textContent = fmtHz(targets[m.s]) + " Hz";
-  } else {
+  } else if (m.st === 2) {
     nameEl.textContent = "—";
     el("target-hz").textContent = "";
   }
@@ -274,24 +349,63 @@ function paintChips(activeIdx) {
       b.type = "button";
       b.className = "chip";
       b.innerHTML = "<b></b><span></span>";
-      b.onclick = () => toggleReference(i);
+      wireChip(b, i);
       wrap.appendChild(b);
     });
   }
   const playing = Tuner.referencePlaying();
+  const pin = Tuner.pinned();
   names.forEach((n, i) => {
     const chip = wrap.children[i];
     const c = lastByString[i];
     chip.classList.toggle("active", i === activeIdx);
     chip.classList.toggle("playing", i === playing);
+    chip.classList.toggle("pinned", i === pin);
     chip.classList.remove("sharp", "flat");
-    chip.children[0].textContent = n;
-    chip.title = "Play " + n + " (" + fmtHz(Tuner.targets()[i]) + " Hz)";
+    chip.children[0].textContent = (i === pin ? "📌 " : "") + n;
+    chip.title = "Tap to tune only " + n + " · hold to hear it ("
+      + fmtHz(Tuner.targets()[i]) + " Hz)";
     if (i === playing) { chip.children[1].textContent = "♪ playing"; return; }
-    if (c === undefined) { chip.children[1].textContent = "–"; return; }
+    if (c === undefined) { chip.children[1].textContent = i === pin ? "pinned" : "–"; return; }
     chip.children[1].textContent = fmtCents(c);
     if (Math.abs(c) >= 0.5) chip.classList.add(c > 0 ? "sharp" : "flat");
   });
+}
+
+// Tap pins, hold plays. Pinning is the primary action because it is what a player actually needs
+// while turning a peg — automatic detection follows whatever is loudest, and when you tune by
+// fifths the loudest thing is usually the neighbouring string you are comparing AGAINST. The
+// reference tone keeps a home on the same control rather than taking a second slot on a screen
+// that has no room for one.
+const HOLD_MS = 450;
+function wireChip(b, i) {
+  let timer = null, held = false;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  b.addEventListener("pointerdown", (e) => {
+    if (e.button) return;
+    held = false;
+    timer = setTimeout(() => { held = true; timer = null; toggleReference(i); }, HOLD_MS);
+  });
+  b.addEventListener("pointerup", () => {
+    if (timer) { cancel(); togglePin(i); }
+    held = false;
+  });
+  // Leaving the button or a scroll gesture must not fire either action.
+  for (const ev of ["pointercancel", "pointerleave"]) b.addEventListener(ev, cancel);
+  // A held chip has already acted on pointerup's behalf; swallow the synthetic click so the
+  // reference tone is not immediately toggled off again.
+  b.addEventListener("click", (e) => { if (held) { e.preventDefault(); e.stopPropagation(); } });
+  b.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+function togglePin(i) {
+  const next = Tuner.pinned() === i ? -1 : i;
+  Tuner.setPinned(next);
+  // Repaint immediately: the estimate stream may be stopped, and a control that does not visibly
+  // respond to a tap reads as broken long before the next message would arrive.
+  const last = Tuner.engine.lastEstimate;
+  paintChips(next >= 0 ? next : last ? last.s : -1);
+  if (last) paintEstimate(last);
 }
 
 function toggleReference(i) {
@@ -521,6 +635,44 @@ function buildDevPanel() {
   toggle.onclick = () => setPanelOpen(panel.style.display === "none");
   el("dev-slot").appendChild(toggle);
 
+  // What to actually DO with this panel. It is written for the real situation — standing up,
+  // instrument under the chin, phone on a stand — where nobody is going to read a repo to find out
+  // which slider to move. Ordered, one action per line, and it names the readout that tells you
+  // whether the action worked.
+  const guide = document.createElement("details");
+  guide.className = "dev-guide";
+  guide.open = true;
+  guide.innerHTML = `<summary>How to use this panel</summary>
+    <ol>
+      <li><b>Check it follows you.</b> Bow each open string in turn, a second each. The big letter
+        must change to that string within about half a second. Watch the <b>Detection</b> table: the
+        string you are bowing should be the <b>0.0 dB</b> row, and the gap to the next row is your
+        margin. Under about 3 dB the lock can stick.</li>
+      <li><b>If a string is never found</b>, bow it and read its row. Sitting a few dB below the
+        winner means detection, not the microphone — lower <em>Lock hysteresis (dB)</em>. Bottom of
+        the table with a loud <b>level</b> means the microphone is not getting that string; try
+        holding the phone nearer the f-holes, and see <em>Harmonics scored</em>.</li>
+      <li><b>If it says “out of range” while you bow</b>, it hears you but cannot place the note.
+        Normally that means the string is more than ~150 cents off. The lock now releases itself
+        after <em>Unlock after deaf for</em>, so it should recover on its own within a second.</li>
+      <li><b>Calibrating the bandwidth</b> — the one number that cannot be derived. Do NOT move the
+        slider while bowing: that mixes the parameter change with the bow change, which is how these
+        sessions go in circles. Instead: bow one steady note, tap <b>Record 15 s</b>, and it replays
+        that same audio in a loop. Now move <em>Demod bandwidth</em> and watch <b>cents SD</b>. Take
+        the lowest value where the number stops improving, then check it doesn't drop lock when you
+        bow with vibrato live.</li>
+      <li><b>Comparing figures.</b> <em>Figure</em> switches between the phasor and two true
+        Lissajous modes. 1 is the classic ellipse against this string's own target. 2 draws each
+        string's ratio to the reference A — the D string as 2:3, E as 3:2 — and your tuning error
+        shows as that shape slowly precessing.</li>
+      <li><b>Reporting anything.</b> <b>Copy diagnostics</b> puts the whole state, including the
+        detection table and any loopback sweep, on the clipboard. <b>Copy as JS</b> gives just the
+        parameters you changed, ready to paste into source.</li>
+      <li><b>Leaving.</b> <em>Collapse</em> hides the panel and keeps the pill. <em>Exit dev</em>
+        leaves properly and survives a reload; three taps on the build id brings it back.</li>
+    </ol>`;
+  panel.appendChild(guide);
+
   // Live measurements. This is what turns the one unverifiable constant in the plan into a minimum
   // on a curve you can see: sweep the bandwidth against a sustained real note and take the lowest
   // value whose jitter stops improving but which doesn't drop lock under vibrato.
@@ -531,8 +683,20 @@ function buildDevPanel() {
     <div><b id="st-drops">0</b><small>lock drops</small></div>
     <div><b id="st-gates">0</b><small>gate closes</small></div>
     <div><b id="st-rate">–</b><small>sample rate</small></div>
-    <div><b id="st-state">–</b><small>state</small></div>`;
+    <div><b id="st-state">–</b><small>state</small></div>
+    <div><b id="st-rms">–</b><small>mic rms (raw)</small></div>
+    <div><b id="st-amp">–</b><small>demod amp</small></div>`;
   panel.appendChild(stats);
+
+  // The detection table. This is the readout that would have turned "the G string doesn't work"
+  // into a one-line diagnosis: it shows every candidate's score, so a string that is sounding but
+  // losing the lock is visible AS a number rather than as an absence.
+  const det = document.createElement("div");
+  det.className = "dev-det";
+  det.innerHTML = `<h3>Detection <em>— bow a string; it should be the 0.0 dB row</em></h3>
+    <table><thead><tr><th>string</th><th>Hz</th><th>score</th><th>level</th></tr></thead>
+    <tbody id="det-body"></tbody></table>`;
+  panel.appendChild(det);
 
   for (const cls of ["measure", "taste"]) {
     const h = document.createElement("h3");
@@ -604,6 +768,34 @@ function paintDevStats() {
   el("st-gates").textContent = s.gateCloses;
   el("st-rate").textContent = Tuner.engine.ctx ? Tuner.engine.ctx.sampleRate : "–";
   el("st-state").textContent = m ? STATES[m.st] : "–";
+  // The two ABSOLUTE levels, which no readout showed before and which are the first question when
+  // nothing happens: is the microphone delivering anything at all (st-rms), and is any of it
+  // arriving in the locked string's band (st-amp)? A diagnostics capture that only reports levels
+  // RELATIVE to each other cannot distinguish "wrong string" from "silent microphone".
+  el("st-rms").textContent = m ? m.n.toFixed(4) : "–";
+  el("st-amp").textContent = m ? m.a.toExponential(1) : "–";
+  paintDetTable(m);
+}
+
+// Per-candidate detection scores, live. `sc` is already in dB relative to the winner, so the row at
+// 0.0 is what the detector currently believes and every other row is how far behind it sits — which
+// IS the margin the lock hysteresis has to clear.
+function paintDetTable(m) {
+  const body = el("det-body");
+  if (!body) return;
+  const names = Tuner.stringNames();
+  const t = Tuner.targets();
+  const sc = m && m.sc;
+  body.innerHTML = names.map((n, i) => {
+    const v = sc && sc[i] !== undefined ? sc[i] : null;
+    const locked = m && m.s === i;
+    // `level` is only meaningful for the string actually locked — it is that string's demodulated
+    // amplitude, and there is only one demodulator.
+    const lvl = locked && m ? m.a.toExponential(1) : "–";
+    return `<tr class="${locked ? "on" : ""}${v !== null && v > -0.05 ? " win" : ""}">
+      <td>${n}${locked ? " ●" : ""}</td><td>${fmtHz(t[i])}</td>
+      <td>${v === null ? "–" : v.toFixed(1) + " dB"}</td><td>${lvl}</td></tr>`;
+  }).join("");
 }
 
 // Sync live values into the URL hash, so a configuration you like is a link you can text yourself.
@@ -666,23 +858,30 @@ function diagnostics() {
     "cents        " + (m && m.c !== null && m.c !== undefined ? fmtCents(m.c) : "(not reported)"),
     "measured     " + (m && m.c !== null && m.s >= 0 ? (t[m.s] * Math.pow(2, m.c / 1200)).toFixed(3) + " Hz" : "–"),
     "state        " + (m ? m.st + " (" + STATES[m.st] + ")" : "–"),
+    "levels       " + (m ? "mic rms " + m.n.toFixed(4) + "   demod amp " + m.a.toExponential(2)
+      + "   gate " + Tuner.params.gateAmp + "   unattributed " + Tuner.params.unattributedRms : "–"),
     "jitter       " + (j === null ? "–" : j.toFixed(4) + " cents SD over 2 s"),
     "lock drops   " + e.stats.lockDrops,
     "gate closes  " + e.stats.gateCloses,
     "messages     " + e.stats.messages,
     "test mode    " + (Tuner.FLAGS.test ? "on, " + Tuner.FLAGS.cents + " cents" : "off"),
+    "detection    " + (m && m.sc
+      ? names.map((n, i) => n + " " + m.sc[i].toFixed(1) + "dB").join("  ") + "   (0.0 = current winner)"
+      : "–"),
     "params       " + JSON.stringify(Tuner.params),
     "non-default  " + JSON.stringify(changedParams()),
   ];
   if (sweepRows) {
-    lines.push("loopback     play -> hear | cents | jitter | lock | level(dB rel)");
+    lines.push("loopback     play -> hear | cents | jitter | lock | level(dB rel) | level(abs) | mic rms");
     const peak = Math.max(...sweepRows.map((r) => r.level), 1e-9);
     for (const r of sweepRows) {
       lines.push("             " + r.played + " -> " + r.heard + (r.ok ? "" : "  << MISMATCH")
         + " | " + (r.cents === null ? "-" : fmtCents(r.cents))
         + " | " + (r.jitter === null ? "-" : r.jitter.toFixed(3))
         + " | " + r.lockedPct + "%"
-        + " | " + (20 * Math.log10(Math.max(r.level, 1e-9) / peak)).toFixed(1));
+        + " | " + (20 * Math.log10(Math.max(r.level, 1e-9) / peak)).toFixed(1)
+        + " | " + r.level.toExponential(2)
+        + " | " + r.input.toFixed(4));
     }
   }
   return lines.join("\n") + "\n";
@@ -789,18 +988,21 @@ function renderSweep(rows) {
   const out = el("dev-sweep-out");
   if (!out) return;
   const peak = Math.max(...rows.map((r) => r.level), 1e-9);
+  const allQuiet = rows.every((r) => r.lockedPct === 0);
   out.innerHTML = `<h3>Loopback <em>— speaker to mic, on this device</em></h3>
-    <table><thead><tr><th>play</th><th>hear</th><th>cents</th><th>jit</th><th>lock</th><th>level</th></tr></thead>
+    <table><thead><tr><th>play</th><th>hear</th><th>cents</th><th>jit</th><th>lock</th><th>level</th><th>mic</th></tr></thead>
     <tbody>${rows.map((r) => `<tr class="${r.ok ? "" : "bad"}">
       <td>${r.played}</td><td>${r.ok ? r.heard : "<b>" + r.heard + "</b>"}</td>
       <td>${r.cents === null ? "–" : fmtCents(r.cents)}</td>
       <td>${r.jitter === null ? "–" : r.jitter.toFixed(2)}</td>
       <td>${r.lockedPct}%</td>
       <td>${(20 * Math.log10(Math.max(r.level, 1e-9) / peak)).toFixed(0)} dB</td>
+      <td>${r.input.toFixed(4)}</td>
     </tr>`).join("")}</tbody></table>
     <div class="help">${Tuner.FLAGS.test
       ? "<b>?test=1 is on, so this measured the synthetic oscillator, not the microphone.</b> Every row will mismatch. Reload without ?test=1 for a real loopback."
-      : "level is relative to the loudest row — that column is the microphone's response across the strings. A mismatch in <b>hear</b> is a detection failure worth reporting."}</div>`;
+      : "<b>mic</b> is the raw input RMS — read it FIRST. If it is near zero the microphone heard nothing and every other column is meaningless. <b>level</b> is relative to the loudest row: that column is the microphone's response across the strings. A mismatch in <b>hear</b> with a healthy <b>mic</b> is a detection failure worth reporting."
+        + (allQuiet ? "<br><b>Every row is under the gate here.</b> On an iPhone that is expected to some degree: while a microphone stream is live, iOS routes output to the EARPIECE rather than the speaker, so the app can barely hear its own tone — and a bare sine at G3 (196 Hz) is nearly inaudible from a phone speaker anyway. Treat a quiet sweep as a limit of the test, not as a verdict on the microphone; bow the actual instrument and watch <b>mic rms</b> in the panel instead." : "")}</div>`;
 }
 
 // Record raw PCM, then hand back a .f32 plus a sidecar JSON. A recording of a real bowed cello C2
@@ -814,8 +1016,11 @@ function onRecord() {
     btn.textContent = "Record 15 s";
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const m = Tuner.engine.lastEstimate;
-    download(new Blob([data.rec.buffer], { type: "application/octet-stream" }), `tuner-${stamp}.f32`);
-    download(new Blob([JSON.stringify({
+    // ONE file. This used to emit a .f32 and a .json back to back, and on an installed iOS PWA two
+    // downloads in one gesture do not both survive — the audio was the one that got lost, which is
+    // the only half that cannot be reconstructed. A WAV carries its own sample rate, plays anywhere,
+    // and takes the sidecar with it in a RIFF INFO comment chunk.
+    download(wavBlob(data.rec, data.sampleRate, {
       sampleRate: data.sampleRate,
       instrument: Tuner.settings.instrument,
       string: m && m.s >= 0 ? Tuner.stringNames()[m.s] : null,
@@ -824,11 +1029,41 @@ function onRecord() {
       temperament: Tuner.settings.temperament,
       samples: data.rec.length,
       params: Tuner.params,
-    }, null, 2)], { type: "application/json" }), `tuner-${stamp}.json`);
+    }), `tuner-${stamp}.wav`);
     // Replay it immediately: the same audio under whatever parameters you move next.
     Tuner.replay(data.rec, data.sampleRate);
   };
   Tuner.record(15);
+}
+
+// Mono 32-bit-float WAV. Float rather than 16-bit PCM because the capture is already float and the
+// quiet end is what matters here — a violin G arrives ~30 dB below the D, and requantising it to
+// integers to save a file size nobody is paying for would throw away the thing under examination.
+function wavBlob(pcm, rate, meta) {
+  const comment = JSON.stringify(meta);
+  const cBytes = new TextEncoder().encode(comment);
+  const cPad = cBytes.length + (cBytes.length % 2);          // RIFF chunks are word-aligned
+  const listSize = 4 + 8 + cPad;                             // "INFO" + ICMT header + text
+  const dataBytes = pcm.length * 4;
+  const size = 4 + (8 + 18) + (8 + 4) + (8 + listSize) + (8 + dataBytes);
+  const buf = new ArrayBuffer(8 + size);
+  const v = new DataView(buf);
+  let o = 0;
+  const str = (t) => { for (let i = 0; i < t.length; i++) v.setUint8(o++, t.charCodeAt(i)); };
+  const u32 = (n) => { v.setUint32(o, n, true); o += 4; };
+  const u16 = (n) => { v.setUint16(o, n, true); o += 2; };
+
+  str("RIFF"); u32(size); str("WAVE");
+  // Format 3 = IEEE float. cbSize is present (18-byte fmt) and a `fact` chunk follows, both of
+  // which the spec requires for non-PCM and some decoders genuinely check for.
+  str("fmt "); u32(18); u16(3); u16(1); u32(rate); u32(rate * 4); u16(4); u16(32); u16(0);
+  str("fact"); u32(4); u32(pcm.length);
+  str("LIST"); u32(listSize); str("INFO"); str("ICMT"); u32(cBytes.length);
+  for (let i = 0; i < cBytes.length; i++) v.setUint8(o++, cBytes[i]);
+  if (cPad !== cBytes.length) v.setUint8(o++, 0);
+  str("data"); u32(dataBytes);
+  for (let i = 0; i < pcm.length; i++) { v.setFloat32(o, pcm[i], true); o += 4; }
+  return new Blob([buf], { type: "audio/wav" });
 }
 
 function download(blob, name) {
@@ -866,11 +1101,13 @@ function exitDevMode() {
   const pill = document.querySelector(".dev-toggle");
   if (pill) pill.remove();
 
-  // Make the exit survive a reload: otherwise ?dev=1 sitting in the URL reopens the panel on the
-  // next launch and "exit" would look broken.
+  // Make the exit survive a reload. Dev mode is ON by default until the first release, so this now
+  // has to WRITE ?dev=0 rather than delete the flag — deleting it would re-enable dev on the next
+  // launch and "exit" would look broken, which is the same failure in the opposite direction.
   try {
     const u = new URL(location.href);
-    if (u.searchParams.has("dev")) { u.searchParams.delete("dev"); history.replaceState(null, "", u); }
+    u.searchParams.set("dev", "0");
+    history.replaceState(null, "", u);
   } catch (e) { /* history unavailable */ }
 
   onReferenceChange();               // restore the non-dev readout state

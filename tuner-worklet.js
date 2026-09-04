@@ -42,6 +42,11 @@ const UNWRAP_STRIDE = 32;
 // unwrapper, so those points are free: sending all of them is 16x the path resolution for 128
 // bytes a message. The plan called the raggedness "acceptable"; it did not need to be.
 const PATH_PER_MSG = MSG_EVERY * (QUANTUM / UNWRAP_STRIDE);   // 16
+
+// The Lissajous modes send a whole CLOSED CURVE per message rather than a trail segment, so the
+// point count is set by how many lobes the curve has: a violin G against the reference A is 4:9 and
+// needs far more points than the 1:1 ellipse to avoid drawing as a polygon.
+const FIG_N_PER_CYCLE = 32, FIG_N_MIN = 96, FIG_N_MAX = 320;
 const LPF_SECTIONS = 4;     // ADDENDUM section 2 — a single pole is not enough (see CASCADE_SCALE)
 
 // Cascading N identical one-poles NARROWS the composite response: for N=4 the -3 dB point sits at
@@ -74,7 +79,7 @@ const DETECT_N_MIN = 1024, DETECT_N_MAX = 8192;
 // body barely radiates 196 Hz and phone mics roll off there — so those partials beat it and an
 // open G read as E5. +-150 still covers +-100 and catches none of them.
 const DETECT_BAND_CENTS = 150;
-const DETECT_PROBE_MAX = 64;       // per harmonic bank; a ceiling on the per-block cost
+const DETECT_OFFSETS_MAX = 48;     // probe positions across the band; a ceiling on the per-block cost
 
 // ...and scoring the fundamental ALONE is what made that collision fatal. Score the harmonic
 // SERIES instead: sum the band peak at k*f0 for k = 1..detHarmonics, weighted 1/k. A string whose
@@ -88,6 +93,58 @@ const DETECT_PROBE_MAX = 64;       // per harmonic bank; a ceiling on the per-bl
 // them.
 const DETECT_HARMONICS = 4;
 
+// ...but only if the series is required to line up at ONE offset. Taking an independent maximum
+// inside each harmonic's band does not require that, and it is why the lock used to stick: every
+// candidate got to pick, per harmonic, whichever nearby foreign partial happened to be loudest.
+//
+// Measured on cello C2, scoring a bowed C2: D3's k=1 band is 134-160 Hz and its BOTTOM PROBE sits
+// 3 Hz from C2's second partial at 130.8 — inside one 11.7 Hz bin, so it collected essentially all
+// of it (43 dB, against C2's own 44 dB total). D3 then trailed the correct answer by 1.0 dB while
+// hystDb demanded 6, so a cellist could bow D3 forever and the readout stayed on C2. Nine of the
+// twelve string-to-string transitions were below the threshold; a real violin sweep of G-D-A-E
+// reported "G3" for all four notes.
+//
+// A string mistuned by d cents shifts EVERY harmonic by exactly d cents. So probe a COMB: evaluate
+// all k harmonics at one shared offset, combine, and take the best offset. A wrong candidate now
+// has to find foreign partials that line up at a single consistent offset, which the fifths do not
+// provide.
+//
+// The comb alone was worth only ~0.5 dB, because the leak above is not an offset inconsistency —
+// it is BIN WIDTH. +-150 cents at cello D3 is +-12.7 Hz and the bins are 11.7 Hz wide, so the band
+// plus one mainlobe bridges the whole 16 Hz gap to C2's second partial. No offset, window or band
+// width fixes that; only a longer block would, and 0.34 s blocks make string changes visibly slow.
+//
+// What does fix it is HOW the comb is combined. A sum lets one huge term carry a candidate: D3's
+// score was essentially "C2's second partial, alone". Take the GEOMETRIC mean of the harmonic
+// powers instead, with an explicit penalty for each harmonic that is not there at all. Every member
+// then has to be present, which is exactly the claim "these partials belong to that string".
+//
+// Flat weights, not 1/k. The 1/k weighting was the arithmetic sum's way of stopping a high partial
+// from dominating; in a geometric mean nothing dominates, and weighting the fundamental up simply
+// reinstates the rolled-off-fundamental failure. Every harmonic counts once, because the question
+// is whether it is THERE, not how loud it is.
+//
+// Three constants, each earning its place against a measured failure:
+//
+//   FLOOR_REL is ABSOLUTE — a fraction of the block's own energy, not of the candidate's own peak.
+//   Flooring relative to the candidate compares floors when the signal is a pure sine with no
+//   partials at all, and a 440 Hz sine duly locked G3 (whose k=2 band edge at 426 Hz is 0.6 bins
+//   away) instead of A4. A tuning fork, or the app's own reference tone, must not do that.
+//
+//   MISS_PEN is what actually separates a real series from a lucky collision, because the
+//   geometric mean alone compresses everything through a 1/kMax root.
+//
+//   MISS_PEN_F0 is extra penalty for a missing FUNDAMENTAL, which is the one thing that tells A4
+//   from G3 on a pure 440 Hz tone. It is deliberately mild: a violin G string's fundamental really
+//   is missing on a phone mic, and that case has to keep winning. 0.5 buys the pure tone 3 dB and
+//   still leaves the rolled-off G string 9 dB clear.
+//
+// Measured worst-case margin over the full instrument x string matrix at 16/44.1/48 kHz, clean and
+// with room noise: bowed strings 1.6 -> 9.4 dB, reference tone 11.5 dB, pure sine 3.6 dB.
+const DETECT_FLOOR_REL = 0.01;      // a harmonic is "not there" below -20 dB of the block's energy
+const DETECT_MISS_PEN = 0.25;       // ...and each absent harmonic costs the candidate 6 dB
+const DETECT_MISS_PEN_F0 = 0.5;     // ...doubled to 12 dB when the absent one is the fundamental
+
 // Defaults. The main thread owns the authoritative copy of this table (tuner.js PARAMS, which is
 // what the ?dev=1 panel is generated from) and posts it as a `config` message at startup; these are
 // the fallbacks that make the worklet runnable on its own, which is how tests/ drives it.
@@ -96,7 +153,9 @@ const DEFAULTS = {
   bwCoef: 0.06,             // capture bandwidth as a fraction of f0
   bwMin: 6, bwMax: 45,      // Hz, clamps on the above
   lsqSec: 0.5,              // least-squares slope window
-  hystDb: 6, hystBlocks: 3, // a new string must beat the locked one by this much, this many times
+  hystDb: 3, hystBlocks: 3, // a new string must beat the locked one by this much, this many times
+  unlockSec: 0.25,          // ...but a lock that hears NOTHING while the room is loud is dropped
+                            //    outright after this long (see emit)
   gateAmp: 0.0012,          // demodulated magnitude below which we refuse to report (noise floor)
   detHarmonics: DETECT_HARMONICS,   // harmonics summed per candidate (see above)
   // Raw input RMS above which a closed gate means "I hear something I cannot attribute to a
@@ -109,6 +168,7 @@ const DEFAULTS = {
   h2ExitCents: 25,          // ...and fall back outside this (hysteresis, so it cannot chatter)
   h2MinRel: 0.15,           // ...and only if the 2*f0 partial is at least this strong vs f0
   h2BlendSec: 0.35,         // crossfade time between the two estimates, so the number never jumps
+  figureMode: 0,            // 0 phasor, 1 Lissajous vs this string, 2 Lissajous vs the reference A
   // --- taste: cannot produce a wrong reading ---
   overlayWeight: 0.4,       // the 0.4 in x = i1 + 0.4*i2
   overlayGateCents: 25,     // above this the 2*f0 phasor undersamples; drop it from the figure
@@ -240,6 +300,7 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.rate = sampleRate;
     this.cfg = Object.assign({}, DEFAULTS, opts.config || {});
     this.targets = opts.targets || [];       // candidate fundamentals, low to high
+    this.ratios = opts.ratios || [];         // integer f0:refA per string (figureMode 2)
     this.quantaPerSec = this.rate / QUANTUM;
     this.unwrapPerSec = this.rate / UNWRAP_STRIDE;   // the rate the unwrapper and LSQ actually run at
 
@@ -252,6 +313,7 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.s2 = new Slope(lsqN);
 
     this.locked = -1;                        // index into targets, -1 = searching
+    this.pinned = -1;                        // user-chosen string; -1 = detect automatically
     this.cand = -1; this.candRuns = 0;       // hysteresis state
     this.env = 0;                            // amplitude follower
     this.blend = 0;                          // 0 = f0 estimate, 1 = 2*f0 estimate
@@ -260,8 +322,16 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.rec = null; this.recFill = 0;       // dev-only raw PCM capture (see onMessage "record")
     this.inRms = 0;                          // smoothed RMS of the RAW input (see unattributedRms)
     this.path = new Float32Array(2 * PATH_PER_MSG);   // interleaved x,y since the last message
+    this.fp = new Float64Array(2);           // scratch for figurePhasor()
     this.pathN = 0;
     this.lastCents = null;
+    this.scores = null;                      // last detection block's per-candidate scores
+    this.detCents = 0;                       // ...and the winning comb's offset, in cents
+    this.odd3 = null;                        // per candidate: did its winning comb see harmonic 3?
+    this.env2 = 0;                           // amplitude follower on the 2*f0 leg (see `starved`)
+    this.starved = false;                    // f0 below the gate while 2*f0 is not: mic rolloff
+    this.unattrRun = 0;                      // consecutive messages of loud-but-unattributed input
+    this.gateShut = true;                    // is the locked string currently producing nothing?
     this.lastX = 0; this.lastY = 0; this.lastTh = 0; this.lastR = 0;
 
     this.sizeDetector();
@@ -275,8 +345,14 @@ class TunerProcessor extends AudioWorkletProcessor {
     if (m.type === "targets") {
       const same = this.targets.length === m.freqs.length && this.targets.every((f, i) => f === m.freqs[i]);
       this.targets = m.freqs.slice();
+      this.ratios = m.ratios ? m.ratios.slice() : [];
       this.sizeDetector();
-      if (!same) { this.locked = -1; this.cand = -1; this.candRuns = 0; this.resetEstimator(); }
+      if (!same) {
+        this.locked = -1; this.cand = -1; this.candRuns = 0;
+        if (this.pinned >= this.targets.length) this.pinned = -1;
+        if (this.pinned >= 0) this.locked = this.pinned;
+        this.resetEstimator();
+      }
       else this.retune();     // same strings (e.g. a redundant post) — do not disturb the lock
     } else if (m.type === "config") {
       Object.assign(this.cfg, m.values || {});
@@ -291,6 +367,19 @@ class TunerProcessor extends AudioWorkletProcessor {
       // ~375 messages a second to say nothing.
       if (m.on) { this.rec = new Float32Array(Math.round(m.seconds * this.rate)); this.recFill = 0; }
       else this.flushRecording();
+    } else if (m.type === "pin") {
+      // Pin the tuner to ONE string and stop detecting. Tuning by fifths means bowing the
+      // NEIGHBOUR as a reference for much of the session, and detection follows whatever is
+      // loudest — measured on a real "tune the G string" take, the app read D4 for 18 of its 27
+      // seconds because the G fundamental arrives ~20 dB down. Automatic detection is right for
+      // "what am I playing"; it is wrong for "I am adjusting THIS peg", and only the player knows
+      // which of those is happening.
+      const i = (m.index === null || m.index === undefined) ? -1 : m.index | 0;
+      this.pinned = i >= 0 && i < this.targets.length ? i : -1;
+      if (this.pinned >= 0 && this.pinned !== this.locked) {
+        this.locked = this.pinned; this.cand = -1; this.candRuns = 0;
+        this.resetEstimator();
+      }
     } else if (m.type === "reset") {
       this.locked = -1; this.cand = -1; this.candRuns = 0; this.resetEstimator();
     }
@@ -317,34 +406,40 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.buildProbes();
   }
 
-  // Precompute each candidate's probe banks: one band of Goertzel coefficients per harmonic,
-  // spanning +-DETECT_BAND_CENTS and spaced at half a bin so the band's response has no dips
-  // between probes. Spacing derives from the bin width rather than being fixed in cents, so a high
-  // harmonic (whose band spans many bins) gets more probes than a low one.
+  // Precompute each candidate's COMBS: one Goertzel coefficient per harmonic per candidate offset,
+  // the offsets spanning +-DETECT_BAND_CENTS. Scoring takes the best offset (see runDetection), so
+  // a candidate is only credited for partials that line up at ONE consistent mistuning — which is
+  // the whole content of "these partials belong to that string" (see DETECT_HARMONICS above).
   //
-  // A mistuned string shifts EVERY harmonic by the same ratio, so the band is the same width in
-  // cents at every k — which is what lets the series still line up on a flat string.
+  // Offsets are spaced in CENTS, not Hz, because a mistuned string shifts every harmonic by the
+  // same cents. The step is set by the TOP harmonic — half a bin at kMax*f0, so the highest, most
+  // sharply-tuned member of the comb can never fall between two offsets and be missed. Every lower
+  // harmonic is then oversampled, which costs nothing.
   buildProbes() {
     const res = this.rate / this.detN;              // Hz per bin
-    const lo = Math.pow(2, -DETECT_BAND_CENTS / 1200), hi = Math.pow(2, DETECT_BAND_CENTS / 1200);
     const coefOf = (f) => 2 * Math.cos((2 * Math.PI * f) / this.rate);
     const K = Math.max(1, Math.round(this.cfg.detHarmonics));
     const nyq = this.rate * 0.5;
+    const hi = Math.pow(2, DETECT_BAND_CENTS / 1200);
 
     this.probes = this.targets.map((f0) => {
-      const banks = [];
-      for (let k = 1; k <= K; k++) {
-        // Drop a harmonic whose band would run past Nyquist — aliased bins score noise.
-        if (f0 * k * hi >= nyq) break;
-        const span = f0 * k * (hi - lo);
-        const n = Math.max(3, Math.min(DETECT_PROBE_MAX, Math.ceil(span / (0.5 * res)) + 1));
-        const bank = new Float64Array(n);
-        for (let j = 0; j < n; j++) {
-          bank[j] = coefOf(f0 * k * (lo + ((hi - lo) * j) / (n - 1)));
-        }
-        banks.push({ w: 1 / k, bank: bank });        // 1/k: a partial matters less the higher it is
+      // Drop harmonics whose band would run past Nyquist — aliased bins score noise.
+      let kMax = 0;
+      while (kMax < K && f0 * (kMax + 1) * hi < nyq) kMax++;
+      if (kMax < 1) kMax = 1;
+
+      const stepC = 1200 * Math.log2(1 + (0.5 * res) / (f0 * kMax));
+      const M = Math.max(3, Math.min(DETECT_OFFSETS_MAX, Math.ceil((2 * DETECT_BAND_CENTS) / stepC) + 1));
+      const combs = new Array(M), cents = new Float64Array(M);
+      for (let m = 0; m < M; m++) {
+        const dc = -DETECT_BAND_CENTS + (2 * DETECT_BAND_CENTS * m) / (M - 1);
+        const r = Math.pow(2, dc / 1200);
+        const c = new Float64Array(kMax);
+        for (let k = 1; k <= kMax; k++) c[k - 1] = coefOf(f0 * k * r);
+        cents[m] = dc;
+        combs[m] = c;
       }
-      return banks;
+      return { kMax: kMax, combs: combs, cents: cents };
     });
   }
 
@@ -367,6 +462,7 @@ class TunerProcessor extends AudioWorkletProcessor {
     this.u1.reset(); this.u2.reset();
     this.s1.reset(); this.s2.reset();
     this.blend = 0; this.useH2 = false;
+    this.env2 = 0; this.starved = false;
     this.retune();
   }
 
@@ -377,22 +473,56 @@ class TunerProcessor extends AudioWorkletProcessor {
   runDetection() {
     const n = this.detN, buf = this.detBuf;
     let best = -1, bestScore = 0, lockedScore = 0;
+    const scores = new Array(this.targets.length);
+    const offsets = new Array(this.targets.length);
+    const odd3 = new Array(this.targets.length);
+    // The "is this harmonic there at all" floor, measured from THIS block (see DETECT_FLOOR_REL).
+    // For a sinusoid of amplitude A, goertzelPower is (n*A/2)^2 and sum(x^2) is n*A^2/2, so
+    // (n/2)*energy puts the two in the same units.
+    let energy = 0;
+    for (let i = 0; i < n; i++) energy += buf[i] * buf[i];
+    const floor = DETECT_FLOOR_REL * (n / 2) * energy;
+    const logFloor = Math.log(floor > 0 ? floor : Number.MIN_VALUE);
     for (let c = 0; c < this.targets.length; c++) {
-      const banks = this.probes[c];
-      let score = 0;
-      for (let h = 0; h < banks.length; h++) {
-        const bank = banks[h].bank;
-        let peak = 0;                                // best power anywhere in THIS harmonic's band
-        for (let j = 0; j < bank.length; j++) {
-          const pw = goertzelPower(buf, n, bank[j]);
-          if (pw > peak) peak = pw;
+      const pr = this.probes[c];
+      let score = 0, offset = 0, odd = false;
+      for (let m = 0; m < pr.combs.length; m++) {    // best SHARED offset, not best per harmonic
+        const comb = pr.combs[m];
+        // Geometric mean of the comb's harmonic powers, penalised per absent harmonic, so a
+        // missing partial cannot be papered over by a loud one (see DETECT_FLOOR_REL above).
+        let ls = 0, pen = 1, any = false, odd3 = false;
+        for (let k = 0; k < pr.kMax; k++) {
+          const pw = goertzelPower(buf, n, comb[k]);
+          if (pw > floor) { ls += Math.log(pw); any = true; if (k === 2) odd3 = true; }
+          else { ls += logFloor; pen *= k === 0 ? DETECT_MISS_PEN * DETECT_MISS_PEN_F0 : DETECT_MISS_PEN; }
         }
-        score += banks[h].w * peak;                  // sum the series, weighted 1/k
+        const s = any ? Math.exp(ls / pr.kMax) * pen : 0;
+        if (s > score) { score = s; offset = pr.cents[m]; odd = odd3; }
       }
+      scores[c] = score;
+      offsets[c] = offset;
+      // Did the winning comb see the THIRD harmonic? That is the octave guard for the starved path
+      // in emit(). A tone that is really at 2*f0 puts energy only on EVEN multiples of f0, so it can
+      // fake k=2 and k=4 but never k=3; a real string whose fundamental the microphone lost still
+      // has its odd partials. Without this, a bare 570 Hz tone read as "D4, 46 cents flat" — the
+      // same octave degeneracy the harmonic sum exists to avoid, re-entered through the back door.
+      odd3[c] = odd;
       if (score > bestScore) { bestScore = score; best = c; }
       if (c === this.locked) lockedScore = score;
     }
+    // Keep the raw scores for diagnostics: the ?dev=1 panel shows them in dB relative to the
+    // winner, which is the only way to SEE why a string that is plainly sounding does not take the
+    // lock. Nothing in the render or the estimate reads them.
+    this.scores = scores;
+    this.detCents = best >= 0 ? offsets[best] : 0;   // the winning comb's offset: a coarse pitch read
+    this.odd3 = odd3;
     if (best < 0) return;
+
+    // Pinned: the scores above are still worth having (the dev panel shows them, and they are how
+    // you see that the string you pinned is not actually the loudest thing in the room), but the
+    // lock is the player's choice and nothing here may override it.
+    if (this.pinned >= 0) { this.locked = this.pinned; this.cand = -1; this.candRuns = 0; return; }
+
 
     if (this.locked < 0) {                      // nothing locked yet: take the winner immediately
       this.locked = best; this.cand = -1; this.candRuns = 0;
@@ -403,8 +533,15 @@ class TunerProcessor extends AudioWorkletProcessor {
 
     // A challenger must beat the incumbent by hystDb across hystBlocks CONSECUTIVE blocks. Without
     // this the lock flaps on every bow change, and each flap resets the demodulator phase.
+    //
+    // ...unless the incumbent's GATE IS SHUT, in which case it is producing no reading at all and
+    // there is nothing for the hysteresis to protect. Dropping the dB threshold (but not the
+    // consecutive-block count, which is what stops noise flapping during silence) makes the escape
+    // level-independent: the unattributedRms path in emit() only fires when the room is LOUD, and a
+    // quiet microphone — an iPhone reported a whole loopback sweep under the gate — leaves a wrong
+    // lock stuck with no way out. A lock that hears nothing has no claim on being kept.
     const beatsBy = 10 * Math.log10((bestScore + 1e-30) / (lockedScore + 1e-30));
-    if (beatsBy >= this.cfg.hystDb) {
+    if (beatsBy >= (this.gateShut ? 0 : this.cfg.hystDb)) {
       if (best === this.cand) this.candRuns++;
       else { this.cand = best; this.candRuns = 1; }
       if (this.candRuns >= this.cfg.hystBlocks) {
@@ -466,15 +603,17 @@ class TunerProcessor extends AudioWorkletProcessor {
         this.s1.push(this.u1.push(th1));
         this.s2.push(this.u2.push(Math.atan2(this.d2.Q, this.d2.I)));
 
-        const a1 = this.d1.mag;
+        const a1 = this.d1.mag, a2 = this.d2.mag;
         this.env += (a1 > this.env ? aAtt : aRel) * (a1 - this.env);
+        this.env2 += (a2 > this.env2 ? aAtt : aRel) * (a2 - this.env2);
         // Normalizing by the follower (not the instantaneous amplitude) is what holds the radius
         // steady across bow pressure. The guard is load-bearing: env is exactly 0 on the first
         // chunks and during silence, and an unguarded divide puts NaN into the render.
         const env = this.env > 1e-9 ? this.env : 1e-9;
-        if (this.pathN < PATH_PER_MSG) {
-          this.path[this.pathN * 2] = (this.d1.I + ow * this.d2.I) / env;
-          this.path[this.pathN * 2 + 1] = (this.d1.Q + ow * this.d2.Q) / env;
+        if (this.pathN < PATH_PER_MSG && cfg.figureMode === 0) {
+          const p = this.figurePhasor(env);
+          this.path[this.pathN * 2] = p[0] + (this.starved ? 0 : (ow * this.d2.I) / env);
+          this.path[this.pathN * 2 + 1] = p[1] + (this.starved ? 0 : (ow * this.d2.Q) / env);
           this.pathN++;
         }
       } else {
@@ -491,17 +630,102 @@ class TunerProcessor extends AudioWorkletProcessor {
     return true;
   }
 
+  // The figure's FUNDAMENTAL phasor, normalized so a healthy note sits near unit radius.
+  //
+  // Normally that is just the f0 demodulator. But a phone microphone can roll the fundamental of a
+  // violin G below the gate while its second partial is still loud, and then d1 carries only noise
+  // — the figure becomes a noise circle and the reading becomes meaningless. In that case take the
+  // phase from the 2*f0 unwrapper and HALVE it: same rotation rate, same direction, same one turn
+  // per beat Hz, but measured on the partial that actually arrived. The absolute offset differs by
+  // a constant, which is unobservable (the whole figure has a rotation knob).
+  figurePhasor(env) {
+    if (this.starved) {
+      const h = 0.5 * this.u2.acc;
+      const e2 = this.env2 > 1e-9 ? this.env2 : 1e-9;
+      const r = Math.min(2, this.d2.mag / e2);
+      this.fp[0] = r * Math.cos(h); this.fp[1] = r * Math.sin(h);
+    } else {
+      this.fp[0] = this.d1.I / env; this.fp[1] = this.d1.Q / env;
+    }
+    return this.fp;
+  }
+
+  // A true two-tone Lissajous, built parametrically from the SAME measured phasor the readout uses.
+  //
+  //   x = cos(q*u)                       the reference, synthesized
+  //   y = the microphone, narrowband at the string's target, reconstructed from I/Q as
+  //       I*cos(p*u) - Q*sin(p*u), which is the demodulator's own identity run backwards
+  //
+  // In mode 1, p:q is 1:1 and the figure is the classic tuning ellipse: still when in tune,
+  // cycling line -> circle -> line once per beat Hz, direction giving the sign of the error. In
+  // mode 2, p:q is the string's ratio to the reference A (violin D is 2:3, E is 3:2, G is 4:9), so
+  // each string gets its own closed shape and the error shows as PRECESSION of that shape.
+  //
+  // Ratios are exact only in pure temperament, which is what makes them integers at all. In equal
+  // temperament a perfectly tuned string still precesses very slowly — 2 cents a fifth. That is
+  // honest, not a bug, and it is one of the few places the difference is visible rather than
+  // asserted.
+  buildLissajous(ow) {
+    const mode = this.cfg.figureMode | 0;
+    const r = mode === 2 && this.ratios[this.locked] ? this.ratios[this.locked] : [1, 1];
+    const p = r[0], q = r[1];
+    const N = Math.max(FIG_N_MIN, Math.min(FIG_N_MAX, FIG_N_PER_CYCLE * Math.max(p, q)));
+    const out = new Float32Array(2 * N);
+    const env = this.env > 1e-9 ? this.env : 1e-9;
+    const f = this.figurePhasor(env);
+    const i1 = f[0], q1 = f[1];
+    // The overlay's size RELATIVE to the fundamental is the timbre, so both legs must share one
+    // normalizer. When the fundamental is synthesized there is no common normalizer and no
+    // fundamental to overlay onto, so the overlay is simply dropped.
+    const w = this.starved ? 0 : ow;
+    const i2 = this.d2.I / env, q2 = this.d2.Q / env;
+    for (let j = 0; j < N; j++) {
+      const u = (2 * Math.PI * j) / N;
+      const pu = p * u;
+      let y = i1 * Math.cos(pu) - q1 * Math.sin(pu);
+      if (w) y += w * (i2 * Math.cos(2 * pu) - q2 * Math.sin(2 * pu));
+      out[2 * j] = Math.cos(q * u);
+      out[2 * j + 1] = y;
+    }
+    return out;
+  }
+
   emit(amp1, amp2, th1) {
     const cfg = this.cfg;
-    const gated = amp1 < cfg.gateAmp;
+    // Gate on EITHER leg. A phone microphone rolls off hard below ~200 Hz and a violin body barely
+    // radiates 196 Hz, so a plainly-sounding open G can arrive with its fundamental under the gate
+    // and its second partial 20 dB above it. Gating on amp1 alone reported that as silence.
+    // ...but only when detection actually saw this string's THIRD harmonic. See runDetection: an
+    // odd partial is the one thing a tone sitting at 2*f0 cannot supply, and without that guard the
+    // 2*f0 leg happily reports an octave-wrong reading with full confidence.
+    this.starved = amp1 < cfg.gateAmp && amp2 >= cfg.gateAmp
+      && !!(this.odd3 && this.locked >= 0 && this.odd3[this.locked]);
+    const gated = amp1 < cfg.gateAmp && amp2 < cfg.gateAmp;
+    this.gateShut = gated;                   // read by runDetection (see the hysteresis bypass)
     let st, cents = null;
 
-    if (this.locked < 0) st = 2;                       // searching
-    else if (gated) {
-      // Gate closed. Two very different reasons, and they must not look the same to the player:
-      // nothing to hear, versus something loud that no string's detection band explains.
-      st = this.inRms > cfg.unattributedRms ? 3 : 0;
-    } else st = 1;
+    // Loud input we cannot attribute reads as "out of range" whether or not something is locked.
+    // Tying that to the lock was wrong twice over: it made a 250-cent-flat string read as silence
+    // once the lock had been dropped, and it made the unlock below flip the display to "listening"
+    // — the exact misreading ADDENDUM section 3 exists to prevent. What the player needs to know is
+    // "I hear you and I cannot place it", and that does not depend on our lock bookkeeping.
+    const unattributed = this.inRms > cfg.unattributedRms;
+    if (this.locked < 0) st = unattributed ? 3 : 2;    // searching
+    else if (gated) st = unattributed ? 3 : 0;         // nothing to hear, vs loud but unexplained
+    else st = 1;
+
+    // A lock that hears NOTHING while the room is loud is a lock on the wrong string, and the
+    // hysteresis that protects a working lock is exactly wrong here: it holds the deaf one. A real
+    // violin sweep of G-D-A-E reported "G3, out of range" for all four notes because of this, for
+    // 32 of 35 seconds. Detection margins are now 9 dB rather than 1.6, but margins are a property
+    // of the instrument and the room, so this stays as the escape hatch that does not depend on
+    // them: drop the lock and let the next block take the winner outright, with no threshold to beat.
+    if (this.locked >= 0 && this.pinned < 0 && gated && unattributed) {
+      if (++this.unattrRun >= Math.max(1, Math.round(cfg.unlockSec * (this.quantaPerSec / MSG_EVERY)))) {
+        this.locked = -1; this.cand = -1; this.candRuns = 0; this.unattrRun = 0;
+        this.resetEstimator();
+      }
+    } else this.unattrRun = 0;
 
     let f0 = this.locked >= 0 ? this.targets[this.locked] : 0;
 
@@ -515,16 +739,25 @@ class TunerProcessor extends AudioWorkletProcessor {
       const centsOf = (df) => 1200 * Math.log2(Math.max(1e-9, 1 + df / f0));
       const c1 = centsOf(df1);
 
-      const relOk = amp2 > cfg.h2MinRel * amp1;
-      if (this.useH2) this.useH2 = relOk && Math.abs(c1) < cfg.h2ExitCents;
-      else this.useH2 = relOk && Math.abs(c1) < cfg.h2EnterCents;
+      if (this.starved) {
+        // The fundamental is under the gate and the second partial is not, so c1 is noise and
+        // there is nothing on the f0 side worth blending in. Switch outright rather than
+        // crossfading through garbage — the 2*f0 estimate is not an approximation here, it is the
+        // only measurement that exists.
+        this.useH2 = true;
+        this.blend = 1;
+      } else {
+        const relOk = amp2 > cfg.h2MinRel * amp1;
+        if (this.useH2) this.useH2 = relOk && Math.abs(c1) < cfg.h2ExitCents;
+        else this.useH2 = relOk && Math.abs(c1) < cfg.h2EnterCents;
 
-      // Crossfade rather than switch. Both estimate the same number, so they agree closely — but a
-      // hard swap would still show as a step in the readout, which is exactly what a tuner must
-      // never do. ADDENDUM section 4: "never let the displayed number jump when it crosses over."
-      const target = this.useH2 ? 1 : 0;
-      const step = 1 / Math.max(1, cfg.h2BlendSec * (this.quantaPerSec / MSG_EVERY));
-      this.blend += Math.max(-step, Math.min(step, target - this.blend));
+        // Crossfade rather than switch. Both estimate the same number, so they agree closely — but
+        // a hard swap would still show as a step in the readout, which is exactly what a tuner must
+        // never do. ADDENDUM section 4: "never let the displayed number jump when it crosses over."
+        const target = this.useH2 ? 1 : 0;
+        const step = 1 / Math.max(1, cfg.h2BlendSec * (this.quantaPerSec / MSG_EVERY));
+        this.blend += Math.max(-step, Math.min(step, target - this.blend));
+      }
 
       const df = (1 - this.blend) * df1 + this.blend * df2;
       cents = centsOf(df);
@@ -536,7 +769,10 @@ class TunerProcessor extends AudioWorkletProcessor {
     }
 
     // --- render-ready geometry -------------------------------------------------
-    // The path was filled per UNWRAP_STRIDE chunk in process(); here it is just handed over.
+    // Mode 0's path was filled per UNWRAP_STRIDE chunk in process() and is handed over as a TRAIL
+    // the renderer appends to. Modes 1 and 2 are a closed CURVE rebuilt from the current phasor,
+    // which the renderer replaces wholesale — hence `fk`, so app.js never has to guess which it got.
+    const mode = cfg.figureMode | 0;
     const env = this.env > 1e-9 ? this.env : 1e-9;
     if (this.pathN > 0) {
       this.lastX = this.path[(this.pathN - 1) * 2];
@@ -544,15 +780,18 @@ class TunerProcessor extends AudioWorkletProcessor {
     }
     if (st === 1 || st === 3) {
       this.lastTh = th1;
-      this.lastR = Math.min(4, amp1 / env);
+      this.lastR = Math.min(4, (this.starved ? amp2 / (this.env2 > 1e-9 ? this.env2 : 1e-9) : amp1 / env));
     }
 
     // st 0 and 2 send an EMPTY path: the main thread freezes and dims the figure, holding exactly
     // what it last drew. A stale figure that still looks in tune is the main way this class of app
     // lies, so a freeze must not quietly keep extending the curve.
-    const path = (st === 1 || st === 3)
-      ? this.path.slice(0, this.pathN * 2)
-      : new Float32Array(0);
+    const live = st === 1 || st === 3;
+    const ow = (this.lastCents !== null && Math.abs(this.lastCents) <= cfg.overlayGateCents)
+      ? cfg.overlayWeight : 0;
+    const path = !live ? new Float32Array(0)
+      : mode === 0 ? this.path.slice(0, this.pathN * 2)
+      : this.buildLissajous(ow);
     this.pathN = 0;
     this.lastCents = cents;
 
@@ -565,6 +804,7 @@ class TunerProcessor extends AudioWorkletProcessor {
       x: this.lastX,
       y: this.lastY,
       p: path,
+      fk: mode === 0 ? 0 : 1,          // 0 = trail segment (append), 1 = closed curve (replace)
       // Absolute levels, for diagnostics only — nothing in the render uses them. `a` is the
       // demodulated amplitude at the locked string (i.e. how much energy is actually in that
       // string's band) and `n` is the raw input RMS. The ratio between them across the four
@@ -572,6 +812,10 @@ class TunerProcessor extends AudioWorkletProcessor {
       // visible instead of merely suspected.
       a: amp1,
       n: this.inRms,
+      // Per-candidate detection scores from the last block, in dB relative to the winner. Purely
+      // diagnostic. A string that is sounding but not locked shows up here as a candidate sitting a
+      // couple of dB below the incumbent — which is the failure that looks like "nothing happens".
+      sc: this.scores ? this.scores.map((v) => 10 * Math.log10((v + 1e-30) / (Math.max.apply(null, this.scores) + 1e-30))) : null,
     }, [path.buffer]);
   }
 }

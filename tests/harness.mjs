@@ -39,13 +39,16 @@ export function loadProcessor(rate) {
 
 // A running tuner you can push signal into. `messages` accumulates exactly what the main thread
 // would receive, which is what the assertions below are written against (ADDENDUM section 1).
-export function makeTuner({ rate = 48000, targets, config = {} } = {}) {
+export function makeTuner({ rate = 48000, targets, ratios, config = {} } = {}) {
   const P = loadProcessor(rate);
-  const proc = new P({ processorOptions: { targets, config } });
+  const proc = new P({ processorOptions: { targets, ratios, config } });
   const messages = [];
   proc.port.postMessage = (m) => messages.push(m);
   return {
     proc, messages, rate,
+    // Deliver a control message exactly as tuner.js does — through the port, not by calling the
+    // handler — so a test covers the real boundary rather than an internal method name.
+    send(msg) { proc.port.onmessage({ data: msg }); return this; },
     // Feed a Float32Array as consecutive 128-sample render quanta.
     feed(signal) {
       const q = new Float32Array(QUANTUM);

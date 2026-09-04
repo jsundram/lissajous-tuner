@@ -29,7 +29,15 @@ node scripts/sw.test.mjs         # 22 service-worker fetch-handler cases
 python3 scripts/sw-lint.py       # precache contract
 node scripts/browser-check.mjs   # real Chromium, ?test=1 (needs a local server)
 node scripts/offline-check.mjs   # prime, go offline, confirm it still runs
+
+node scripts/analyze-recording.mjs take.m4a --expect G3,D4,A4,E5   # a REAL recording, second by second
 ```
+
+`analyze-recording.mjs` decodes anything ffmpeg can read, feeds it to `tuner-worklet.js` itself, and
+prints lock / state / cents / level **and every candidate's detection score in dB** per half second.
+Every other fixture in this repo is synthetic; this is the one that uses the actual instrument in the
+actual room. `--save` writes the `.f32` + `.json` pair `tests/harness.mjs` reads, so a recording that
+shows a failure becomes a regression test in one more step.
 
 `tests/harness.mjs` loads `tuner-worklet.js` under `vm` with the AudioWorklet globals stubbed. The
 DSP has exactly one copy; keep it that way.
@@ -42,8 +50,15 @@ bumps `V` and restamps `build.js` *in one commit*. That order is deliberate and 
 commits), but `build.js` is itself precached, so bumping `V` in the earlier commit tripped
 `sw-lint` on every deploy. Bump and stamp travel together.
 
+**The loopback sweep is near-useless on an iPhone, and that is not a bug in the microphone.** While
+a `getUserMedia` stream is live, iOS routes output to the EARPIECE rather than the speaker, so the
+app can barely hear its own tone — a real device reported 0% lock on all four rows. A bare sine at
+G3 (196 Hz) is nearly inaudible from a phone speaker anyway. Read the `mic` column (raw input RMS)
+FIRST: if it is near zero the test did not run, and every other column is meaningless. For real
+answers about microphone response, bow the instrument and watch `mic rms` / `demod amp` live.
+
 **Loopback sweep** (dev panel) plays each string's reference tone and reports what the mic + detector
-made of it — play/hear/cents/jitter/lock%/level. It is the only test that covers speaker → room →
+made of it — play/hear/cents/jitter/lock%/level/mic. It is the only test that covers speaker → room →
 mic → detector, the path that produced the open-G misdetection, and its `level` column IS the
 microphone's response across the strings. Meaningless under `?test=1` (that measures the synthetic
 oscillator), and the panel says so. Dev mode deliberately stops suppressing the readout while a
@@ -59,9 +74,24 @@ sticky `.dev-head` — for one release it did not, and opening the panel on a ph
 with no way back short of relaunching. `setPanelOpen()` is the single owner of open/closed; the
 pill, the triple-tap gesture and the header's Collapse all go through it.
 
+**Record 15 s writes ONE `.wav`,** 32-bit float, with the whole sidecar (rate, instrument, locked
+string, every parameter) in a RIFF INFO comment chunk. It used to emit a `.f32` and a `.json` back to
+back; on an installed iOS PWA two downloads in one gesture do not both survive, and the half that got
+lost was the audio — the only half that cannot be reconstructed. `analyze-recording.mjs` reads the
+comment back, so a phone recording needs no second file.
+
 `Exit dev` (not Collapse) is the full exit: it removes the pill, empties the panel, clears
 `devMode` — which restores reference-tone suppression — and strips `?dev=1` from the URL so the
 exit survives a reload.
+
+**Dev mode is ON by default until the first release** (`?dev=0` turns it off, and that is what
+`Exit dev` writes into the URL so the exit survives a reload — it used to DELETE the flag, which
+under the new default would silently re-enable dev). Everything still needing calibration against a
+real instrument lives behind it, and asking someone holding a violin to type a query string into a
+phone is how a calibration session does not happen. The panel carries its own ordered instructions
+and a live **Detection** table showing every candidate's score in dB — that table is what turns "the
+G string doesn't work" into a one-line diagnosis, because a string that is sounding but losing the
+lock appears AS a number rather than as an absence. Flip the default back in `tuner.js FLAGS.dev`.
 
 **Three taps on the build id opens the dev panel.** An installed PWA has no URL bar, so `?dev=1`
 cannot be typed once it is on the home screen — which is exactly where it needs calibrating against
@@ -73,18 +103,65 @@ the tree was dirty at stamp time. `scripts/stamp-build.sh --deploy` suppresses t
 
 ## Things that are true and cost time to find
 
-- **Detection scores a HARMONIC SUM over ±150-cent bands.** Three constraints collide: a single bin
-  can't be wide enough for a ±100-cent-flat string (39 Hz at E5) *and* narrow enough to separate
-  cello C2 from G2 (32.6 Hz apart), and a *wide* band catches the neighbours' partials. At ±300,
-  E5's band was 555–785 Hz, which contains G3's 3rd and 4th partials (587, 782) — a real violin's
-  **open G read as E5**, because its fundamental is weak (the body barely radiates 196 Hz and phone
-  mics roll off there). ±150 catches neither, and summing `k = 1..detHarmonics` weighted 1/k means
-  a rolled-off fundamental no longer loses the string. **Both halves are needed** — with the narrow
-  band but `detHarmonics: 1` it mislocks to A4 on leakage from G3's strong 2nd partial. Bands stay
-  disjoint from each other because strings are fifths (702 cents), so anything under ±351 is safe.
+- **Detection scores a COMB over ±150-cent bands, combined as a geometric mean.** Three constraints
+  collide: a single bin can't be wide enough for a ±100-cent-flat string (39 Hz at E5) *and* narrow
+  enough to separate cello C2 from G2 (32.6 Hz apart), and a *wide* band catches the neighbours'
+  partials. At ±300, E5's band was 555–785 Hz, which contains G3's 3rd and 4th partials (587, 782)
+  — a real violin's **open G read as E5**, because its fundamental is weak (the body barely radiates
+  196 Hz and phone mics roll off there). ±150 catches neither.
+- **The sticky lock, and why per-harmonic maxima were the cause.** The first fix scored each
+  candidate by summing an INDEPENDENT peak per harmonic band, weighted 1/k. That let every candidate
+  pick, per harmonic, whichever nearby foreign partial was loudest — and the margins between
+  fifth-related strings collapsed to **1.6–5.7 dB against a 6 dB `hystDb`**. Nine of the twelve
+  string-to-string transitions were unreachable *by construction*: a real G–D–A–E sweep on video read
+  "G3 / out of range" for 32 of its 35 seconds. Every test passed, because every test bowed one
+  string into a fresh tuner — the one thing a player never does.
+  The measured cause is BIN WIDTH, not offset: cello D3's k=1 band is 134–160 Hz and its bottom probe
+  sits 3 Hz from C2's second partial at 130.8, inside one 11.7 Hz bin. No band width, window or
+  offset separates that; only a longer block would, and 0.34 s blocks make string changes visibly
+  slow. Three changes, together worth 1.6 → 9.4 dB worst case:
+  1. **One shared offset** (a comb), since a mistuned string shifts every harmonic by the same cents.
+  2. **Geometric mean, not a sum**, with a penalty per absent harmonic. A sum lets one huge term
+     carry a candidate; a geometric mean makes every member have to be present. Flat weights — 1/k
+     re-inflates the fundamental and loses the rolled-off cello C2 (3.4 dB weighted, 8.3 flat).
+  3. **The floor is a fraction of the BLOCK's energy, not of the candidate's own peak.** Relative
+     flooring compares floors when the signal is a pure sine with no partials, and a 440 Hz tone duly
+     locked G3 (whose k=2 band edge is 0.6 bins away) instead of A4. A tuning fork must not do that.
+- **Automatic detection answers the wrong question while you are TUNING.** Confirmed on real
+  recordings of tuning each string by fifths: a 27-second "tune the G string" take reads **D4 for 18
+  of those seconds**, and it is not wrong to — the D really is 20–40 dB louder at the microphone
+  than the G. Tuning by fifths means bowing the NEIGHBOUR as your reference for much of the session,
+  so "what is loudest" and "which peg am I turning" are different strings most of the time. Hence
+  **pinning**: tap a chip to lock the tuner to one string and stop detecting, tap again to release.
+  Detection answers "what am I playing"; only the player knows the other. Nothing in the DSP may
+  override a pin — not the hysteresis, not the deaf-lock escape hatch.
+- **Chips: tap pins, hold (450 ms) plays the reference tone.** The tone used to be the tap action.
+  Pinning took it because it is what you need while actually turning a peg, and the screen has no
+  room for a second control per string. `wireChip()` owns the gesture; it swallows the synthetic
+  click after a hold so the tone is not immediately toggled off again.
+- **`hystDb` is 3, and must not go back to 6.** It is now BELOW the measured margins rather than
+  above them. Raising it past ~5 re-creates the sticky lock; re-measure the 4×4 margin matrix first.
+- **A deaf lock releases itself** after `unlockSec` (0.25 s): gate shut while the raw input is loud
+  means we are locked to a string that does not explain what is being played, and hysteresis exists
+  to protect a lock that is WORKING. This is the escape hatch that does not depend on detection
+  margins, which are a property of the instrument and the room. Loud-but-unattributable reports
+  `st: 3` whether or not anything is locked — tying that to the lock made a 250-cent-flat string read
+  as silence the moment the lock dropped.
+- **The violin G arrives 20–40 dB below the D and A**, measured, not assumed — `amp1` around
+  4e-3 against 1e-1 on the same take, at ~3–6x the 0.0012 gate. That is the whole reason the G
+  string is fragile: a quieter room or the phone a foot further away puts it under the gate. It is
+  also why `MISS_PEN_F0` is deliberately mild and why `detHarmonics` must stay at 4.
 - **Never score a bare 2·f0 octave probe.** `G2 = 1.5·C2` means `2·G2 = 3·C2` exactly, so it lands
-  on the third partial of the string below. The harmonic sum is the principled version: requiring
-  the whole series to line up removes that degeneracy.
+  on the third partial of the string below. The comb is the principled version: requiring the whole
+  series to line up removes that degeneracy.
+- **The gate is on EITHER demodulator leg, and the 2·f0 leg needs an octave guard.** A phone mic can
+  put a plainly-sounding open G's fundamental under `gateAmp` while its second partial is 20 dB
+  above it; gating on `amp1` alone reported that as silence. So when f0 is starved and 2·f0 is not,
+  the 2·f0 estimate carries the reading outright (no crossfade — there is nothing on the f0 side
+  worth blending) and the figure's phasor is synthesized from the 2·f0 phase HALVED, which has the
+  same rotation rate and direction. But that path reopened the octave hole immediately: a bare
+  570 Hz tone read as "D4, 46 cents flat". The guard is that detection must have seen the string's
+  **third harmonic** — an odd partial is the one thing a tone sitting at 2·f0 cannot supply.
 - **Past ±150 cents nothing can lock**, so the demodulator hears nothing and the gate closes. That
   must not read as silence when the player is bowing: `unattributedRms` compares the RAW input
   level and reports `st: 3` (out of range) rather than `st: 0` (listening).
@@ -106,8 +183,21 @@ the tree was dirty at stamp time. `scripts/stamp-build.sh --deploy` suppresses t
 - **While a reference tone sounds the mic hears OUR tone**, so the tuner would lock that string and
   report ~0.0 cents — indistinguishable from a perfectly tuned instrument. `paintEstimate` returns
   a reference state instead of a reading. Do not "fix" this by letting the number through.
-- **The figure's SHAPE means nothing about pitch** (ADDENDUM §4). A 2:1 ratio traces a fixed
-  limaçon. Shape is timbre, motion is error. No UI copy may imply otherwise.
+- **The figure's SHAPE means nothing about pitch — in `figureMode: 0`** (ADDENDUM §4). A 2:1 ratio
+  traces a fixed limaçon. Shape is timbre, motion is error. No UI copy may imply otherwise.
+- **...but there are now two true-Lissajous modes, and in those the shape IS the string.** This was
+  asked for directly: the expectation was a figure of the reference against the microphone, which is
+  not what the phasor is. `figureMode` 1 draws `x = cos(u)` against the narrowband microphone
+  reconstructed from I/Q — the classic tuning ellipse, still when in tune, cycling line → circle →
+  line once per beat Hz, the same on every string. `figureMode` 2 draws each string's integer ratio
+  to the reference A (violin D 2:3, E 3:2, G 4:9) and the error shows as that shape PRECESSING.
+  Both are built in the worklet from the same measured phasor the readout uses, so the boundary
+  holds: the message carries `fk` (0 = trail to append, 1 = closed curve to replace) and `app.js`
+  branches on that rather than on the parameter — a message posted before a mode change still
+  renders as whatever it actually is. Ratios are integers only because the strings are pure fifths;
+  in equal temperament a perfectly tuned string precesses slowly against the pure ratio, which is a
+  true statement about the tuning rather than an artefact. `strings.js ratios()` owns them.
+  Cello C2 is 4:27 against the A — honest, and an unreadable lattice. Say so rather than hiding it.
 - iOS: `apple-mobile-web-app-status-bar-style` must be `default`. `black-translucent` forces white
   status-bar text, invisible against the light theme.
 - The zero-gain `GainNode` to `destination` is required, not decorative — Safari stops pulling an
@@ -146,6 +236,11 @@ So anything that draws must repaint on `onThemeChange`, and must read colours th
 `min-height:0` or the flex child refuses to shrink and pushes the chips off-screen, and `.hud` is
 hidden until `.stage.live` — empty captions before Start read as a broken screen.
 
+**`VIZ_KEY` must be bumped whenever a DEFAULT changes.** `load()` lets a stored value win over the
+default, so any device that ever touched a slider has the whole table frozen at that day's defaults
+and a corrected default silently never arrives. `hystDb` 6 → 3 is exactly that case: the fix for the
+sticky lock would not have reached the one phone it was diagnosed on. It is `lt-viz2` now.
+
 **Adding a parameter is one line** in `tuner.js PARAMS`; the panel is generated from it. `cls:
 "taste"` ships and persists to localStorage, `cls: "measure"` is calibrate-then-bake, and
 `worklet: true` forwards it to the DSP. Do not add a knob that can change the reported number
@@ -176,6 +271,18 @@ specificity as `.stage.live .hud` and comes later, which is why the gated rule i
 - Cello C2 detection on a real phone mic is unverified — the fundamental may be rolled off. The
   harmonic sum should carry it; the **loopback sweep's `level` column** is how to check, and
   `detHarmonics` is the knob if it doesn't.
+- The sticky-lock fix is **confirmed on a real violin**: a G–D–A–E take that read "G3" throughout on
+  lt-v12 now finds all four strings, each within ~0.5 s. That was measured against recordings which
+  are **deliberately not in the repo** (`recordings/` is gitignored — it is audio of a person, and
+  this is public). So the confirmation is real but *not reproducible from a clean checkout*: ask for
+  a recording rather than assuming one is on disk, and use `scripts/analyze-recording.mjs`.
+- **Cents readings during tuning show excursions of 40–90 cents** (seen in local tuning takes) between
+  otherwise steady stretches. Some of that is real — a peg being turned genuinely moves the pitch —
+  but not obviously all of it, and it has not been separated from bow noise or from the demodulator
+  losing a slackened string. This is the next thing to chase, and the recordings are already here.
+- The two Lissajous modes are **unjudged on a real instrument** — the choice between them and the
+  phasor is a taste call that has to be made while actually tuning something. Once made, bake it in
+  and delete the other two.
 - The open-G fix was derived from the physics and synthetic partial profiles, **not confirmed on a
   real violin**. The loopback sweep is the confirmation; a mismatch in its `hear` column is the
   failure reappearing.

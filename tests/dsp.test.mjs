@@ -192,6 +192,120 @@ for (const rate of RATES) {
     assert.equal(settledMode(T, "s"), 0, "must lock C2, not G2");
     assertNoNaN(T);
   });
+
+  // --- 12: the bug a real violin found the second time -------------------------------
+  // Every case above bows ONE string into a fresh tuner, which is the one thing a player never
+  // does. A 35-second video of a real G-D-A-E sweep read "G3 / out of range" for 32 of them: the
+  // lock took G3 and never moved. Detection margins between fifth-related strings were 1.6-5.7 dB
+  // against a 6 dB hysteresis, so nine of the twelve transitions were unreachable BY CONSTRUCTION
+  // and no single-string test could see it.
+  //
+  // The fix is three-part and this case is what holds all three honest: score each candidate as a
+  // geometric mean over a shared-offset comb (margins to 9 dB), drop the hysteresis to 3 dB, and
+  // unlock outright when a locked string hears nothing while the room is loud.
+  for (const [name, inst, profiles] of [
+    ["violin", violin, [
+      [0.02, 0.30, 0.22, 0.16, 0.11, 0.08, 0.05, 0.04],   // dull G: fundamental 23 dB down
+      [0.15, 0.30, 0.20, 0.13, 0.09, 0.06],
+      [0.22, 0.26, 0.16, 0.10, 0.07],
+      [0.15, 0.30, 0.25, 0.18, 0.12],                     // bright E: 2nd partial over the 1st
+    ]],
+    ["cello", cello, [
+      [0.02, 0.30, 0.22, 0.15, 0.11, 0.08, 0.06, 0.05],
+      [0.06, 0.30, 0.20, 0.14, 0.10, 0.07],
+      [0.20, 0.26, 0.18, 0.12, 0.08],
+      [0.26, 0.24, 0.16, 0.10, 0.07],
+    ]],
+  ]) {
+    for (const gapSec of [0, 0.3]) {
+      test(`[${rate}] ${name} sweep across all four strings${gapSec ? "" : ", no gaps"} -> each is found`, () => {
+        const t = inst();
+        const NOTE = 1.6;
+        const parts = [];
+        for (let i = 0; i < 4; i++) {
+          parts.push(tone(t[i] * centsToRatio(-10), NOTE, rate, { amps: profiles[i].map((a) => a * 0.3) }));
+          if (gapSec) parts.push(silence(gapSec, rate));
+        }
+        const T = makeTuner({ rate, targets: t }).feed(concat(...parts));
+        const perSec = rate / 128 / 4;                    // messages per second
+        const seg = (NOTE + gapSec) * perSec;
+        for (let i = 0; i < 4; i++) {
+          // Judge the tail of each note: the first 40% is allowed to still be switching.
+          const win = T.messages.slice(Math.round(i * seg + 0.4 * NOTE * perSec),
+                                       Math.round(i * seg + 0.98 * NOTE * perSec));
+          const votes = {};
+          let locked = 0;
+          for (const m of win) { votes[m.s] = (votes[m.s] || 0) + 1; if (m.st === 1) locked++; }
+          const heard = Number(Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0]);
+          assert.equal(heard, i, `bowing string ${i} but locked ${heard} — the sticky-lock bug`);
+          assert.ok(locked / win.length > 0.9,
+            `string ${i} reported a reading only ${Math.round((100 * locked) / win.length)}% of the note`);
+        }
+        assertNoNaN(T);
+      });
+    }
+  }
+}
+
+// --- the figure modes -------------------------------------------------------------
+// Not a measurement, but the ratio plumbing crosses three files (strings.js computes it, tuner.js
+// posts it, the worklet draws from it) and a browser check caught it silently falling back to 1:1
+// because the constructor overwrote processorOptions a few lines after reading them. Lobe counts
+// are the cheapest thing that could have caught that: an x/y zero-crossing count IS q and p.
+for (const rate of [48000, 16000]) {
+  test(`[${rate}] figureMode 2 draws each string's true ratio to the reference A`, () => {
+    const t = violin(), r = S.ratios("violin");
+    for (let i = 0; i < 4; i++) {
+      const T = makeTuner({ rate, targets: t, ratios: r, config: { figureMode: 2 } })
+        .feed(tone(t[i] * centsToRatio(3.93), 2.0, rate, { partials: 3 }));
+      const m = T.last();
+      assert.equal(m.s, i, `should lock string ${i}`);
+      assert.equal(m.fk, 1, "a Lissajous mode must post a CLOSED CURVE, not a trail segment");
+      const n = m.p.length / 2;
+      let xz = 0, yz = 0;
+      for (let k = 1; k < n; k++) {
+        if (Math.sign(m.p[2 * k]) !== Math.sign(m.p[2 * (k - 1)])) xz++;
+        if (Math.sign(m.p[2 * k + 1]) !== Math.sign(m.p[2 * (k - 1) + 1])) yz++;
+      }
+      assert.equal(xz, 2 * r[i][1], `${["G3", "D4", "A4", "E5"][i]}: x should cross zero 2q times`);
+      assert.equal(yz, 2 * r[i][0], `${["G3", "D4", "A4", "E5"][i]}: y should cross zero 2p times`);
+    }
+  });
+
+  test(`[${rate}] figureMode 0 still posts an appendable trail`, () => {
+    const t = violin();
+    const T = makeTuner({ rate, targets: t }).feed(tone(t[2], 2.0, rate, { partials: 3 }));
+    assert.equal(T.last().fk, 0, "the phasor mode must stay a trail");
+  });
+}
+
+// --- pinning ------------------------------------------------------------------------
+// Tuning by fifths means bowing the NEIGHBOUR for much of the session. Measured on a real "tune the
+// G string" recording, the app read D4 for 18 of 27 seconds — correctly, because the D really was
+// 20 dB louder than the G. Detection answers "what am I playing"; the player pinning a string
+// answers "I am adjusting THIS peg", and nothing in the DSP may override the second with the first.
+for (const rate of [48000, 16000]) {
+  test(`[${rate}] a pinned string survives a louder neighbour`, () => {
+    const t = violin();
+    const T = makeTuner({ rate, targets: t });
+    T.send({ type: "pin", index: 0 });                  // pin G3
+    // ...then play a D4 that is 20 dB louder than anything on the G string.
+    T.feed(tone(t[1], SECONDS, rate, { amps: [0.30, 0.22, 0.15, 0.10] }));
+    assert.equal(settledMode(T, "s"), 0, "a pinned G3 must not be dragged onto a loud D4");
+    assertNoNaN(T);
+  });
+
+  test(`[${rate}] unpinning restores automatic detection`, () => {
+    const t = violin();
+    const T = makeTuner({ rate, targets: t });
+    T.send({ type: "pin", index: 0 });
+    T.feed(tone(t[1], 1.5, rate, { amps: [0.30, 0.22, 0.15, 0.10] }));
+    assert.equal(T.last().s, 0, "still pinned");
+    T.send({ type: "pin", index: -1 });
+    T.feed(tone(t[1], 2.0, rate, { amps: [0.30, 0.22, 0.15, 0.10] }));
+    assert.equal(T.last().s, 1, "after unpinning it must find the D4 that is actually sounding");
+    assertNoNaN(T);
+  });
 }
 
 // --- temperament ------------------------------------------------------------------

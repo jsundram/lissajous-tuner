@@ -34,5 +34,34 @@
     return f;
   }
 
-  root.Strings = { INSTRUMENTS, targets, PURE, EQUAL };
+  // Each string's frequency as an exact integer ratio to the reference A, which is what the
+  // Lissajous-against-the-reference figure is drawn from (tuner-worklet.js buildLissajous).
+  //
+  // These are integers ONLY because the strings are pure fifths: stacking 3/2 keeps numerator and
+  // denominator whole, so violin D:A is 2:3 and G:A is 4:9. In equal temperament there is no such
+  // ratio — 2^(7/12) is irrational — so the figure is drawn from the pure ratio either way and a
+  // perfectly-tuned equal-tempered string precesses slowly against it, by the same 1.955 cents per
+  // fifth documented above. That is a true statement about the tuning, not an artefact.
+  //
+  // Ratios get complex fast away from the anchor: cello C2 is 4:27 against the A, which draws as a
+  // 27-lobe figure. Legible for the strings near the anchor, honest but dense at the extremes.
+  function ratios(instrument) {
+    const spec = INSTRUMENTS[instrument];
+    if (!spec) throw new Error("unknown instrument: " + instrument);
+    const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+    return spec.names.map((_, i) => {
+      const d = i - spec.anchor;
+      let num = 1, den = 1;
+      for (let k = 0; k < Math.abs(d); k++) {
+        if (d > 0) { num *= 3; den *= 2; } else { num *= 2; den *= 3; }
+      }
+      // The cello's anchor is the A an octave down; anything other than 1 or 1/2 would need real
+      // rational arithmetic here rather than this one line.
+      if (spec.anchorRatio === 0.5) den *= 2;
+      const g = gcd(num, den);
+      return [num / g, den / g];
+    });
+  }
+
+  root.Strings = { INSTRUMENTS, targets, ratios, PURE, EQUAL };
 })(typeof globalThis !== "undefined" ? globalThis : self);
