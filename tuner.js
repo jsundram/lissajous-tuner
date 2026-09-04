@@ -19,6 +19,9 @@
   //   "measure" — changes what the app REPORTS. These have right answers that do not depend on
   //               taste, so they get calibrated against a real instrument and then BAKED IN. A
   //               tuner that lets you drag its bandwidth is a tuner that can quietly lie to you.
+  // A parameter with `choices` is an ENUM, not a quantity, and the panel renders it as a segmented
+  // radio group rather than a slider. Dragging a continuous control between "Phasor" and "vs A" was
+  // never meaningful — there is nothing at 0.5 — and a slider invites exactly that.
   const PARAMS = {
     // --- taste ---------------------------------------------------------------
     trailAlpha:     { def: 0.03, min: 0.005, max: 0.12,  step: 0.005, cls: "taste",
@@ -30,9 +33,11 @@
     orientation:    { def: 0,    min: -180,  max: 180,   step: 5,     cls: "taste",
                       label: "Figure rotation", unit: "deg", help: "Cosmetic. Rotates the whole figure." },
     hueByError:     { def: 1,    min: 0,     max: 1,     step: 1,     cls: "taste",
-                      label: "Colour by error sign", unit: "0/1", help: "Tint the trace sharp/flat instead of a single colour." },
+                      choices: [[0, "One colour"], [1, "Sharp / flat"]],
+                      label: "Colour by error sign", unit: "", help: "Tint the trace sharp/flat instead of a single colour." },
     targetGuide:    { def: 1,    min: 0,     max: 1,     step: 1,     cls: "taste",
-                      label: "Reference outline", unit: "0/1",
+                      choices: [[0, "Off"], [1, "On"]],
+                      label: "Reference outline", unit: "",
                       help: "A faint outline of the orbit the figure lives on \u2014 a circle for the phasor and the unison Lissajous, the string\u2019s p:q lattice against the reference A for figure 2. It shows the centre, the scale and (in figure 2) the lobes to expect. It is NOT a shape to match: being in tune makes the figure STAND STILL, at whatever phase it happens to be at." },
     releaseSec:     { def: 1.5,  min: 0.2,   max: 5,     step: 0.1,   cls: "taste", worklet: true,
                       label: "Follower release", unit: "s", help: "How slowly the radius gives up as a note decays." },
@@ -41,7 +46,8 @@
     overlayGateCents:{ def: 25,  min: 5,     max: 60,    step: 5,     cls: "taste", worklet: true,
                       label: "Overlay gate", unit: "cents", help: "Past this the 2*f0 phasor undersamples; drop it from the figure." },
     figureMode:     { def: 0,    min: 0,     max: 2,     step: 1,     cls: "taste", worklet: true,
-                      label: "Figure", unit: "0 phasor / 1 unison / 2 vs A",
+                      choices: [[0, "Phasor"], [1, "Unison"], [2, "vs A"]],
+                      label: "Figure", unit: "",
                       help: "0 — the phasor: a vector turning once per beat Hz. Shape is timbre, motion is error. 1 — a true Lissajous against this string's own target: the classic ellipse, still when in tune, cycling line→circle→line once per beat. 2 — a true Lissajous against the reference A, so each string draws its own ratio (violin D is 2:3, E is 3:2, G is 4:9) and the error shows as that shape precessing." },
 
     // --- measurement ---------------------------------------------------------

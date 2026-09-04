@@ -172,6 +172,10 @@ a{ color:var(--accent) }
 .dev-row label{ font-weight:600 }
 .dev-row output{ font:600 12px/1 ui-monospace, monospace; color:var(--accent) }
 .dev-row input[type=range]{ grid-column:1 / -1; width:100% }
+/* An enum row uses the same .seg control as the bar; it just has to span the row's grid like the
+   slider it replaces, and sit on the panel's own surface rather than the card's. */
+.dev-row .seg{ grid-column:1 / -1; width:100%; margin-top:2px }
+.dev-row .seg button{ flex:1; padding:7px 6px; font-size:12px }
 .dev-row .help{ grid-column:1 / -1; color:var(--muted); font-size:11px; line-height:1.35 }
 .dev-stats{ display:grid; grid-template-columns:repeat(auto-fit, minmax(84px, 1fr)); gap:6px; margin:8px 0 }
 .dev-stats div{ background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:6px 8px }

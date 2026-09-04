@@ -259,7 +259,10 @@ default, so any device that ever touched a slider has the whole table frozen at 
 and a corrected default silently never arrives. `hystDb` 6 → 3 is exactly that case: the fix for the
 sticky lock would not have reached the one phone it was diagnosed on. It is `lt-viz2` now.
 
-**Adding a parameter is one line** in `tuner.js PARAMS`; the panel is generated from it. `cls:
+**Adding a parameter is one line** in `tuner.js PARAMS`; the panel is generated from it. Give it
+`choices: [[value, "Label"], ...]` and it renders as a segmented radio group instead of a slider,
+reusing the same `.seg` control as the instrument and temperament pickers — an enum like
+`figureMode` has nothing at 0.5 and a continuous slider invites dragging to it. `cls:
 "taste"` ships and persists to localStorage, `cls: "measure"` is calibrate-then-bake, and
 `worklet: true` forwards it to the DSP. Do not add a knob that can change the reported number
 without putting it in `measure`.

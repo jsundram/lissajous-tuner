@@ -776,17 +776,35 @@ function buildDevPanel() {
       const row = document.createElement("div");
       row.className = "dev-row";
       const value = Tuner.params[key];
-      row.innerHTML = `<label for="p-${key}">${spec.label}</label>
-        <output id="o-${key}">${value}${spec.unit ? " " + spec.unit : ""}</output>
-        <input type="range" id="p-${key}" min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${value}">
-        ${spec.help ? `<div class="help">${spec.help}</div>` : ""}`;
-      panel.appendChild(row);
-      row.querySelector("input").oninput = (e) => {
-        const v = parseFloat(e.target.value);
-        Tuner.setParam(key, v);
-        el("o-" + key).textContent = v + (spec.unit ? " " + spec.unit : "");
-        syncHash();
-      };
+      const unit = (v) => v + (spec.unit ? " " + spec.unit : "");
+
+      if (spec.choices) {
+        // An enum: a radio group, not a slider. Reuses the same .seg control the instrument and
+        // temperament pickers use, so there is one segmented-choice pattern in the app rather
+        // than two that drift apart.
+        // No <output>: for a slider the number IS the value and has nowhere else to live, but here
+        // the pressed segment already says it, and repeating it just adds a second thing to read.
+        row.innerHTML = `<label>${spec.label}</label>
+          <div class="seg" id="p-${key}" role="radiogroup" aria-label="${spec.label}"></div>
+          ${spec.help ? `<div class="help">${spec.help}</div>` : ""}`;
+        panel.appendChild(row);
+        buildSegmented(el("p-" + key), spec.choices,
+          () => Tuner.params[key],
+          (v) => { Tuner.setParam(key, v); paintChoice(key); syncHash(); });
+        paintChoice(key);
+      } else {
+        row.innerHTML = `<label for="p-${key}">${spec.label}</label>
+          <output id="o-${key}">${unit(value)}</output>
+          <input type="range" id="p-${key}" min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${value}">
+          ${spec.help ? `<div class="help">${spec.help}</div>` : ""}`;
+        panel.appendChild(row);
+        row.querySelector("input").oninput = (e) => {
+          const v = parseFloat(e.target.value);
+          Tuner.setParam(key, v);
+          el("o-" + key).textContent = unit(v);
+          syncHash();
+        };
+      }
     }
   }
 
@@ -821,6 +839,15 @@ function buildDevPanel() {
 
   devStatsTimer = setInterval(paintDevStats, 250);
   applyHash();
+}
+
+// The pressed state of one enum row. buildSegmented's own set() calls syncControls(), which only
+// knows about the two controls in the bar — so the panel paints its own.
+function paintChoice(key) {
+  const node = el("p-" + key);
+  if (!node) return;
+  const current = String(Tuner.params[key]);
+  for (const b of node.children) b.setAttribute("aria-checked", String(b.dataset.value === current));
 }
 
 function paintDevStats() {
@@ -876,6 +903,7 @@ function applyHash() {
     const n = parseFloat(v);
     if (!Number.isFinite(n)) continue;
     Tuner.setParam(k, n);
+    if (Tuner.PARAMS[k].choices) { paintChoice(k); continue; }
     const input = el("p-" + k), out = el("o-" + k);
     if (input) input.value = n;
     if (out) out.textContent = n + (Tuner.PARAMS[k].unit ? " " + Tuner.PARAMS[k].unit : "");
