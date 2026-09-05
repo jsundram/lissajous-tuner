@@ -31,13 +31,22 @@ node scripts/browser-check.mjs   # real Chromium, ?test=1 (needs a local server)
 node scripts/offline-check.mjs   # prime, go offline, confirm it still runs
 
 node scripts/analyze-recording.mjs take.m4a --expect G3,D4,A4,E5   # a REAL recording, second by second
+node scripts/analyze-recording.mjs take.m4a --track A4            # ...cross-checked independently
 ```
 
 `analyze-recording.mjs` decodes anything ffmpeg can read, feeds it to `tuner-worklet.js` itself, and
 prints lock / state / cents / level **and every candidate's detection score in dB** per half second.
 Every other fixture in this repo is synthetic; this is the one that uses the actual instrument in the
-actual room. `--save` writes the `.f32` + `.json` pair `tests/harness.mjs` reads, so a recording that
-shows a failure becomes a regression test in one more step.
+actual room. It also reads the app's own single-`.wav` captures, sidecar and all. `--save` writes
+the `.f32` + `.json` pair `tests/harness.mjs` reads, so a recording that shows a failure becomes a
+regression test in one more step.
+
+**`--track <string>` is the cross-check, and it is what to reach for whenever the question is "is the
+app wrong, or is the instrument doing that".** It prints an independent estimate beside the app's: a
+harmonic comb with no demodulator, no lock and no ±150-cent band, so it shares no machinery with the
+thing being measured. Grading the estimator with itself cannot answer that question, and two of this
+repo's findings turned on it. Its scan stays under ±351 cents on purpose — the strings are pure
+fifths, so a wider one finds the NEIGHBOUR and reports a confident −702.
 
 `tests/harness.mjs` loads `tuner-worklet.js` under `vm` with the AudioWorklet globals stubbed. The
 DSP has exactly one copy; keep it that way.
@@ -318,15 +327,16 @@ specificity as `.stage.live .hud` and comes later, which is why the gated rule i
   lt-v12 now finds all four strings, each within ~0.5 s. That was measured against recordings which
   are **deliberately not in the repo** (`recordings/` is gitignored — it is audio of a person, and
   this is public). So the confirmation is real but *not reproducible from a clean checkout*: ask for
-  a recording rather than assuming one is on disk, and use `scripts/analyze-recording.mjs`.
+  a recording rather than assuming one is on disk, and use `scripts/analyze-recording.mjs`. On the
+  machine this was developed on, `recordings/` holds the G–D–A–E sweep, four by-fifths tuning takes,
+  `D5-on-A-string-octave-case.wav` (the octave bug), and two screen captures.
 - ~~Cents excursions of 40–90 cents during tuning~~ — **resolved: they are real, and the estimator
-  tracks them correctly.** Checked against an independent pitch tracker (a wide harmonic comb, no
-  demodulator, no lock, no ±150-cent band, so it shares no machinery with the thing under test). On
-  a peg-tuned A the tracker and the app agree throughout a −94-cent excursion; on an E tuned with
-  the fine tuner ONLY, both stay inside +17/−13 cents for the whole take. The split between those
-  two is the confirmation: the big swings appear exactly where a peg was turned and nowhere else.
-  When writing such a check, keep the comb's scan under ±351 cents — a wider one locks the
-  neighbouring fifth and reports a confident −702.
+  tracks them correctly.** Checked with `analyze-recording.mjs --track`. On a
+  peg-tuned A the tracker and the app agree throughout a −94-cent excursion; on an E tuned with the
+  fine tuner ONLY, both stay inside +17/−13 cents for the whole take. The split between those two is
+  the confirmation: the big swings appear exactly where a peg was turned and nowhere else. What is
+  left is pure lag — the app trails in whichever direction the pitch is moving and agrees to 0.4
+  cents once it settles, which is the least-squares window costing about `lsqSec/2`.
 - The two Lissajous modes are **unjudged on a real instrument** — the choice between them and the
   phasor is a taste call that has to be made while actually tuning something. Once made, bake it in
   and delete the other two.

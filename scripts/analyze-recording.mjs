@@ -14,6 +14,7 @@
 //   node scripts/analyze-recording.mjs tuner-2026-09-04T18-21-00.f32
 //   node scripts/analyze-recording.mjs take1.m4a
 //   node scripts/analyze-recording.mjs take1.m4a --instrument cello --expect C2,G2,D3,A3
+//   node scripts/analyze-recording.mjs take1.m4a --track A4     # cross-check against the app
 //   node scripts/analyze-recording.mjs take1.m4a --save tests/fixtures/violin-sweep
 //
 // --save writes the .f32 + .json pair the harness reads, so a recording that shows a failure can
@@ -118,6 +119,49 @@ if (peak < 0.02) console.log("  ** very quiet: the gate may never open. Record c
 if (peak > 0.999) console.log("  ** clipped: clipping adds harmonics and will skew detection. **");
 console.log();
 
+// --- the independent cross-check -----------------------------------------------------
+// A pitch tracker that shares NO machinery with the thing under test: a harmonic comb scanned over
+// a wide range, with no demodulator, no lock, no hysteresis and no +-150 cent detection band. This
+// is what settles "is that excursion the instrument or the estimator", and grading the estimator
+// with itself cannot answer it. It resolved a real question once already: 40-90 cent swings during
+// tuning turned out to be genuine peg movement, confirmed because a string tuned with the FINE
+// TUNER only stayed inside +-17 cents on the same instrument in the same room.
+//
+// RANGE stays under 351 cents on purpose. The strings are pure fifths (702 cents apart), so a wider
+// scan finds the NEIGHBOUR and reports a confident -702 — which is exactly what a first version of
+// this did, on an E-string take where the A was ringing.
+const TRACK_RANGE = 340, TRACK_STEP = 3, TRACK_K = 6, TRACK_N = 8192;
+function trackCents(off, f0) {
+  if (off + TRACK_N > pcm.length) return null;
+  let energy = 0;
+  for (let i = 0; i < TRACK_N; i++) energy += pcm[off + i] * pcm[off + i];
+  if (Math.sqrt(energy / TRACK_N) < 0.01) return null;      // too quiet to claim a pitch
+  const mag = (f) => {
+    const c = 2 * Math.cos((2 * Math.PI * f) / rate);
+    let s1 = 0, s2 = 0;
+    for (let i = 0; i < TRACK_N; i++) { const v = pcm[off + i] + c * s1 - s2; s2 = s1; s1 = v; }
+    return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - c * s1 * s2));
+  };
+  let best = -Infinity, bestC = 0;
+  for (let c = -TRACK_RANGE; c <= TRACK_RANGE; c += TRACK_STEP) {
+    const f = f0 * Math.pow(2, c / 1200);
+    let sum = 0;
+    for (let k = 1; k <= TRACK_K; k++) if (f * k < rate / 2) sum += mag(f * k) / k;
+    if (sum > best) { best = sum; bestC = c; }
+  }
+  return bestC;
+}
+
+const trackArg = arg("track", null);
+let trackIdx = -1;
+if (trackArg !== null) {
+  trackIdx = /^\d+$/.test(trackArg) ? Number(trackArg) : names.indexOf(trackArg);
+  if (trackIdx < 0 || trackIdx >= names.length) {
+    console.error(`--track: "${trackArg}" is not a string of this instrument (${names.join(", ")})`);
+    process.exit(2);
+  }
+}
+
 const T = makeTuner({ rate, targets, ratios }).feed(pcm);
 const msgPerSec = rate / 128 / 4;
 const STATES = ["gated", "locked", "searching", "out-of-range"];
@@ -126,7 +170,9 @@ const STATES = ["gated", "locked", "searching", "out-of-range"];
 // score in dB relative to the winner, so a string that is sounding but losing shows as a number.
 const BUCKET = 0.5;
 const per = Math.max(1, Math.round(msgPerSec * BUCKET));
-console.log("   time  lock   state         cents   level    mic rms   detection scores (dB, 0 = winner)");
+console.log("   time  lock   state         cents"
+  + (trackIdx >= 0 ? "   indep(" + names[trackIdx] + ")" : "")
+  + "   level    mic rms   detection scores (dB, 0 = winner)");
 const heardOverall = {};
 for (let i = 0; i + per <= T.messages.length; i += per) {
   const b = T.messages.slice(i, i + per);
@@ -150,8 +196,12 @@ for (let i = 0; i + per <= T.messages.length; i += per) {
     (i / msgPerSec).toFixed(1).padStart(7) + "  "
     + (lock >= 0 ? names[lock] : "—").padEnd(5) + "  "
     + STATES[st].padEnd(13)
-    + (cents === null ? "    —" : (cents > 0 ? "+" : "") + cents.toFixed(1)).padStart(6) + "  "
-    + (lvl / b.length).toExponential(1).padStart(8) + "  "
+    + (cents === null ? "    —" : (cents > 0 ? "+" : "") + cents.toFixed(1)).padStart(6)
+    + (trackIdx < 0 ? "" : (() => {
+        const ind = trackCents(Math.round((i / msgPerSec) * rate), targets[trackIdx]);
+        return (ind === null ? "—" : (ind > 0 ? "+" : "") + ind).padStart(13);
+      })())
+    + "  " + (lvl / b.length).toExponential(1).padStart(8) + "  "
     + (mic / b.length).toFixed(4).padStart(8) + "   "
     + (sc ? sc.map((v, k) => names[k] + " " + v.toFixed(0)).join("  ") : ""));
 }
