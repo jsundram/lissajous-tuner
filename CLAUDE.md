@@ -247,7 +247,7 @@ npm run shot -- --engine webkit                           # closest available th
 picture. Use `--settle` if a cold browser start hasn't filled the trail yet.
 
 **Design tokens** are the only place colour lives: `--bg --card --ink --muted --line --accent
---trace --sharp --flat` plus `--radius --maxw`, defined three times in `styles.css` (`:root`, the
+--trace --sharp --flat --intune` plus `--radius --maxw`, defined three times in `styles.css` (`:root`, the
 `prefers-color-scheme: dark` block, and `:root[data-theme="dark"]`). **Keep the two dark blocks in
 sync.** `sw.js`'s `offlineFallback()` hardcodes the palette by necessity — it renders when
 `styles.css` is unreachable — so a palette change means editing it too.
@@ -258,10 +258,43 @@ So anything that draws must repaint on `onThemeChange`, and must read colours th
 `getCssColor`, never a literal.
 
 **Layout ownership.** `#tuner` is a `100dvh` flex column: `.bar` (three controls) / `.stage` /
-`.statusrow` (dev pill + build id) / `.chips`. `.stage` holds the canvas, `.hud` (corner overlays,
-`pointer-events:none`) and `.overlay` (start / mic-error). Two load-bearing details: `.stage` needs
-`min-height:0` or the flex child refuses to shrink and pushes the chips off-screen, and `.hud` is
-hidden until `.stage.live` — empty captions before Start read as a broken screen.
+`.statusrow` (figure picker + dev pill + build id) / `.chips`. `.stage` holds the canvas, `.hud`
+(the string name top-left, the three numbers on one line along the bottom, `pointer-events:none`)
+and `.overlay` (start / mic-error). Three load-bearing details: `.stage` needs `min-height:0` or the
+flex child refuses to shrink and pushes the chips off-screen; `.hud` is hidden until `.stage.live` —
+empty captions before Start read as a broken screen; and `.hud > div` sets `flex-direction:column`,
+which **outscores a bare class** — the bottom row has to be `.hud > .hud-row` or it silently stays a
+column and stacks the three numbers back up in the corner.
+
+**Target / measured / delta live on ONE line, in that order, under the figure.** They used to be in
+three different corners, which is the one arrangement that defeats the only thing they are for:
+being compared. Centred as a group rather than `space-between`, because on a wide desktop stage
+space-between puts them further apart than the corners did, and every width is in `ch` against a
+monospace font so a reading going `+3.4` → `−12.7` cannot shuffle the row sideways.
+
+**`--intune` is a third colour, not the absence of the other two.** Sharp and flat alone make "in
+tune" something you read out of a *missing* tint, which is slower and less certain than reading a
+present one. The band is the `inTuneCents` taste parameter (±1 cent, a RADIUS), and `inTune()` in
+`app.js` is the single predicate behind all three places the sign appears — the cents readout, the
+chips and the trace — so they cannot disagree about when you have arrived. It colours the number; it
+never changes it, which is why it is taste and not measure.
+
+**The reference A is an editable field, not just a stepper.** A415 is fifty taps of the arrow from
+A440 and nobody makes fifty taps, so baroque pitch was unreachable in practice. Commit on
+blur/Enter, never on `input`: "41" on the way to "415" is a finite number that clamps to 392 and
+eats the next keystroke. `syncControls()` skips the field while it has focus for the same reason,
+so `commitA()` writes the normalised value itself rather than leaving it to that.
+
+**The figure picker is on the main screen as well as in the dev panel**, because choosing between
+Phasor / Unison / vs A is a taste call that can only be made while actually tuning something, and
+reaching into a panel that covers the bottom 72dvh to make it is how that comparison never happens.
+It is one parameter with two controls: `paintChoice(key)` paints by KEY through `CHOICE_NODES`, not
+by node, so neither can go stale while the other moves. Once the call is made, bake the winner into
+`figureMode`, delete the other two, and the statusrow goes back to being status.
+
+**Adding a parameter needs no `VIZ_KEY` bump** — `load()` merges stored values *over* the defaults,
+so a key that isn't in storage yet simply gets its default. Changing an existing default is the case
+that does.
 
 **`VIZ_KEY` must be bumped whenever a DEFAULT changes.** `load()` lets a stored value win over the
 default, so any device that ever touched a slider has the whole table frozen at that day's defaults

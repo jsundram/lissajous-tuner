@@ -10,12 +10,22 @@
   --bg:#f4f3ef; --card:#ffffff; --ink:#16211f; --muted:#5c6b68; --line:#dcdad3; --accent:#0f766e;
   --trace:#0f766e;                     /* the figure itself — see --trace note in the dark blocks */
   --sharp:#b45309; --flat:#1d4ed8;     /* error-sign tints, used by the cents readout */
+  --intune:#15803d;                    /* the THIRD state — see the note below */
   --radius:12px; --maxw:640px;
 }
 @media (prefers-color-scheme: dark){
-  :root:not([data-theme]){ --bg:#0e1413; --card:#161d1c; --ink:#e8efed; --muted:#8b9a97; --line:#26302e; --accent:#2ee6a8; --trace:#2ee6a8; --sharp:#fbbf24; --flat:#7dd3fc; }
+  :root:not([data-theme]){ --bg:#0e1413; --card:#161d1c; --ink:#e8efed; --muted:#8b9a97; --line:#26302e; --accent:#2ee6a8; --trace:#2ee6a8; --sharp:#fbbf24; --flat:#7dd3fc; --intune:#4ade80; }
 }
-:root[data-theme="dark"]{ --bg:#0e1413; --card:#161d1c; --ink:#e8efed; --muted:#8b9a97; --line:#26302e; --accent:#2ee6a8; --trace:#2ee6a8; --sharp:#fbbf24; --flat:#7dd3fc; }
+:root[data-theme="dark"]{ --bg:#0e1413; --card:#161d1c; --ink:#e8efed; --muted:#8b9a97; --line:#26302e; --accent:#2ee6a8; --trace:#2ee6a8; --sharp:#fbbf24; --flat:#7dd3fc; --intune:#4ade80; }
+
+/* --intune is a THIRD colour, not the absence of the other two. With only sharp and flat, "in tune"
+   has to be read out of a tint that is missing, and deciding from an absence is slower and less
+   certain than reading a colour — which is the whole job of a tuner's readout. The band it means is
+   the `inTuneCents` parameter (±1 cent by default), and it drives the cents readout, the chips and
+   the trace together, so all three agree about when you have arrived.
+   It has to stay distinguishable from --sharp AND --flat in both themes; in dark it also sits near
+   --trace, which is fine because with hueByError on the trace is never --trace while a number
+   exists. Green because that is what green means on a tuner. */
 
 *{ box-sizing:border-box; margin:0; padding:0 }
 html{ -webkit-text-size-adjust:100% }   /* stop iOS inflating text on rotate */
@@ -52,7 +62,15 @@ a{ color:var(--accent) }
   appearance:none; border:0; background:transparent; color:var(--ink); cursor:pointer;
   font:600 15px/1 system-ui, sans-serif; padding:8px 12px; min-height:34px; min-width:34px;
 }
-#refa-value{ font:600 12px/1 ui-monospace, monospace; min-width:44px; text-align:center; color:var(--muted) }
+/* An editable field, so it reads as --ink rather than --muted: a greyed number looks like a
+   readout, and this one takes typing. Width is in ch on a monospace font so "440.0" and "415.0"
+   cannot resize the bar. */
+#refa-value{
+  appearance:none; border:0; background:transparent; border-radius:999px;
+  font:600 13px/1 ui-monospace, monospace; width:5.5ch; text-align:center; color:var(--ink);
+  padding:8px 0; min-height:34px;
+}
+#refa-value:focus{ outline:2px solid var(--accent); outline-offset:-2px; color:var(--accent) }
 
 /* ---- the figure ------------------------------------------------------------------ */
 /* min-height:0 is load-bearing: without it a flex child refuses to shrink below its content and
@@ -70,16 +88,27 @@ a{ color:var(--accent) }
 .hud > div{ position:absolute; display:flex; flex-direction:column; gap:2px }
 .hud small{ font:500 10px/1 system-ui, sans-serif; color:var(--muted); letter-spacing:.04em; text-transform:uppercase }
 .hud-tl{ top:0; left:0 }
-.hud-tr{ top:0; right:0; align-items:flex-end }
-.hud-bl{ bottom:0; left:0 }
-.hud-br{ bottom:0; right:0; align-items:flex-end }
+
+/* Target, measured, delta on one line and CENTRED as a group rather than spread corner to corner:
+   space-between across a 1400px desktop stage puts them further apart than the corners did. The
+   widths are in ch against a monospace font, so a reading going from "+3.4" to "−12.7" cannot
+   shuffle the row sideways — comparing three numbers requires that they hold still. */
+/* `.hud > .hud-row`, not `.hud-row`: `.hud > div` above sets flex-direction:column and outscores a
+   bare class, so the row silently stayed a column. */
+.hud > .hud-row{
+  left:0; right:0; bottom:0;
+  flex-direction:row; align-items:flex-end; justify-content:center;
+  gap:clamp(12px, 5vw, 44px);
+}
+.hud-cell{ display:flex; flex-direction:column; align-items:center; gap:2px }
 
 #string-name{ font:700 clamp(34px, 11vw, 60px)/1 system-ui, sans-serif; letter-spacing:-.02em }
-#target-hz, #measured-hz{ font:600 13px/1 ui-monospace, monospace; color:var(--ink) }
-#cents{ font:700 clamp(26px, 8vw, 42px)/1 ui-monospace, monospace; letter-spacing:-.02em }
+#target-hz, #measured-hz{ font:600 15px/1 ui-monospace, monospace; color:var(--ink); min-width:9ch; text-align:center }
+#cents{ font:700 clamp(24px, 7.5vw, 38px)/1 ui-monospace, monospace; letter-spacing:-.02em; min-width:6ch; text-align:center }
 #cents.sharp{ color:var(--sharp) }
 #cents.flat{ color:var(--flat) }
-#direction{ color:var(--muted) }
+#cents.intune{ color:var(--intune) }
+#direction{ color:var(--muted); white-space:nowrap }
 
 /* Dimmed + frozen below the noise floor. A stale figure that still looks in tune is the main way
    this class of app lies to you, so the dimming has to be unmistakable. */
@@ -123,9 +152,13 @@ a{ color:var(--accent) }
 .chip span{ font:600 12px/1 ui-monospace, monospace; color:var(--muted); font-variant-numeric:tabular-nums }
 .chip.sharp span{ color:var(--sharp) }
 .chip.flat span{ color:var(--flat) }
+.chip.intune span{ color:var(--intune) }
 
 /* ---- build id: always visible, never dev-gated -------------------------------------- */
 .statusrow{ flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:0 2px; min-height:16px }
+/* The figure picker shares this row with the dev pill and the build id, so it runs a size smaller
+   than the ones in the bar — three segments plus a pill plus a build id has to fit across 375px. */
+.statusrow .seg button{ padding:7px 9px; font-size:11px }
 .dev-slot{ flex:0 0 auto; display:flex; gap:6px }
 .buildid{
   margin-left:auto; text-align:right;

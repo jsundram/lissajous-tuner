@@ -70,7 +70,11 @@
     <div class="spacer"></div>
     <div class="stepper" aria-label="Reference A">
       <button type="button" id="refa-down" aria-label="Lower reference A">&minus;</button>
-      <span id="refa-value">440.0</span>
+      <!-- An INPUT, not a label. A415 is fifty taps of the arrow away from A440, and nobody makes
+           fifty taps: baroque pitch was unreachable in practice while this was a read-only number.
+           inputmode=decimal gets the numeric keypad on a phone; the arrows stay for nudging. -->
+      <input type="text" id="refa-value" inputmode="decimal" enterkeyhint="done"
+             autocomplete="off" spellcheck="false" aria-label="Reference A, hertz" value="440.0">
       <button type="button" id="refa-up" aria-label="Raise reference A">+</button>
     </div>
     <div class="seg" id="temperament" role="radiogroup" aria-label="Temperament"></div>
@@ -82,11 +86,17 @@
   <div class="stage">
     <canvas id="figure"></canvas>
 
+    <!-- The three numbers whose whole job is to be COMPARED sit on one line, in reading order:
+         target, measured, delta. They used to occupy three different corners of the figure, which
+         is the one arrangement that makes comparing them work. The string name keeps the top-left
+         corner to itself — it is a label, not a number, and nothing is compared against it. -->
     <div class="hud" aria-live="polite">
       <div class="hud-tl"><span id="string-name">&mdash;</span></div>
-      <div class="hud-tr"><span id="target-hz"></span><small>target</small></div>
-      <div class="hud-bl"><span id="measured-hz"></span><small>measured</small></div>
-      <div class="hud-br"><span id="cents">&mdash;</span><small id="direction">&nbsp;</small></div>
+      <div class="hud-row">
+        <div class="hud-cell"><span id="target-hz"></span><small>target</small></div>
+        <div class="hud-cell"><span id="measured-hz"></span><small>measured</small></div>
+        <div class="hud-cell hud-delta"><span id="cents">&mdash;</span><small id="direction">&nbsp;</small></div>
+      </div>
     </div>
 
     <!-- Real UI for the states that actually happen: needing a gesture, being refused the mic,
@@ -105,6 +115,13 @@
        first one — and now that the chips are buttons that play reference tones, an overlay there
        swallows taps meant for a control. -->
   <div class="statusrow">
+    <!-- The figure picker is on the MAIN screen, not only in the dev panel. Which of the three
+         figures is the right one is a taste call that can only be made while actually tuning
+         something, and reaching into a panel that covers the bottom 72dvh to make it is exactly how
+         that comparison never happens. It is the SAME parameter the panel renders, so the two
+         controls paint through one function (paintChoice) and cannot disagree. Once the call is
+         made, bake the winner in, delete the other two, and this row goes back to being status. -->
+    <div class="seg" id="figuremode" role="radiogroup" aria-label="Figure"></div>
     <span class="dev-slot" id="dev-slot"></span>
     <span class="buildid" id="buildid" title="build"></span>
   </div>

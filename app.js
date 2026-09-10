@@ -110,12 +110,23 @@ function clearFigure() {
   fig.ctx.fillRect(0, 0, fig.w, fig.h);
 }
 
+// Is this reading inside the in-tune band? One predicate, three call sites — the cents readout, the
+// chips and the trace — because three places showing the sign of the same number must agree about
+// when it has reached zero. The band is a RADIUS: inTuneCents 1.0 means anything inside +/-1 cent.
+function inTune(cents) {
+  return cents !== null && cents !== undefined && !Number.isNaN(cents)
+    && Math.abs(cents) <= Tuner.params.inTuneCents;
+}
+
 // Colour the trace by error sign when asked. Deliberately a TASTE knob: it cannot change the
 // number, only how fast you read its sign — which the direction of rotation already tells you.
+// Three colours, not two: "in tune" was the absence of a tint, and reading a state out of a missing
+// colour is slower than reading one out of a present colour.
 function traceColor(cents) {
-  if (!Tuner.params.hueByError || cents === null || Number.isNaN(cents) || Math.abs(cents) < 1.0) {
+  if (!Tuner.params.hueByError || cents === null || Number.isNaN(cents)) {
     return Theme.getCssColor("--trace") || "#2ee6a8";
   }
+  if (inTune(cents)) return Theme.getCssColor("--intune") || "#2ee6a8";
   return Theme.getCssColor(cents > 0 ? "--sharp" : "--flat") || "#2ee6a8";
 }
 
@@ -329,7 +340,7 @@ function paintEstimate(m) {
     el("target-hz").textContent = fmtHz(Tuner.targets()[ref]) + " Hz";
     el("measured-hz").textContent = "";
     el("cents").textContent = "♪";
-    el("cents").classList.remove("sharp", "flat");
+    el("cents").classList.remove("sharp", "flat", "intune");
     el("direction").textContent = "reference tone";
     return;
   }
@@ -362,7 +373,7 @@ function paintEstimate(m) {
 
   const centsEl = el("cents");
   const dirEl = el("direction");
-  centsEl.classList.remove("sharp", "flat");
+  centsEl.classList.remove("sharp", "flat", "intune");
 
   if (m.st === 2) {
     centsEl.textContent = "—"; dirEl.textContent = "listening";
@@ -376,9 +387,11 @@ function paintEstimate(m) {
   } else {
     centsEl.textContent = fmtCents(m.c);
     // Rotation direction already gives the sign; the word is here anyway because reading a
-    // direction takes a beat longer than reading a word.
-    dirEl.textContent = Math.abs(m.c) < 0.5 ? "in tune" : m.c > 0 ? "sharp" : "flat";
-    if (Math.abs(m.c) >= 0.5) centsEl.classList.add(m.c > 0 ? "sharp" : "flat");
+    // direction takes a beat longer than reading a word. Arriving gets its own colour rather than
+    // the absence of one — see inTune().
+    const tuned = inTune(m.c);
+    dirEl.textContent = tuned ? "in tune" : m.c > 0 ? "sharp" : "flat";
+    centsEl.classList.add(tuned ? "intune" : m.c > 0 ? "sharp" : "flat");
     if (m.s >= 0) {
       el("measured-hz").textContent = fmtHz(targets[m.s] * Math.pow(2, m.c / 1200)) + " Hz";
       lastByString[m.s] = m.c;
@@ -390,7 +403,7 @@ function paintEstimate(m) {
   // label is unmistakable so this can never be read as a measurement of an instrument.
   if (ref >= 0) {
     dirEl.textContent = "loopback · " + Tuner.stringNames()[ref];
-    centsEl.classList.remove("sharp", "flat");
+    centsEl.classList.remove("sharp", "flat", "intune");
   }
 
   // A lone "MEASURED" under nothing reads as a bug; hide the caption with its value.
@@ -426,14 +439,14 @@ function paintChips(activeIdx) {
     chip.classList.toggle("active", i === activeIdx);
     chip.classList.toggle("playing", i === playing);
     chip.classList.toggle("pinned", i === pin);
-    chip.classList.remove("sharp", "flat");
+    chip.classList.remove("sharp", "flat", "intune");
     chip.children[0].textContent = (i === pin ? "📌 " : "") + n;
     chip.title = "Tap to tune only " + n + " · hold to hear it ("
       + fmtHz(Tuner.targets()[i]) + " Hz)";
     if (i === playing) { chip.children[1].textContent = "♪ playing"; return; }
     if (c === undefined) { chip.children[1].textContent = i === pin ? "pinned" : "–"; return; }
     chip.children[1].textContent = fmtCents(c);
-    if (Math.abs(c) >= 0.5) chip.classList.add(c > 0 ? "sharp" : "flat");
+    chip.classList.add(inTune(c) ? "intune" : c > 0 ? "sharp" : "flat");
   });
 }
 
@@ -510,7 +523,11 @@ function syncControls() {
     const current = String(node._get());
     for (const b of node.children) b.setAttribute("aria-checked", String(b.dataset.value === current));
   }
-  el("refa-value").textContent = Tuner.settings.refA.toFixed(1);
+  paintChoice("figureMode");     // two controls, one parameter — see paintChoice
+  // Never overwrite the field mid-edit: syncControls runs on every settings change, and rewriting
+  // "41" to "440.0" under the cursor eats the digit that was about to make it 415.
+  const refA = el("refa-value");
+  if (document.activeElement !== refA) refA.value = Tuner.settings.refA.toFixed(1);
   // A changed instrument means a different number of strings and different targets; drop the
   // per-string memory rather than showing a G3 reading under a C2 label.
   paintChips(Tuner.engine.lastEstimate ? Tuner.engine.lastEstimate.s : -1);
@@ -526,14 +543,39 @@ function wireControls() {
     () => Tuner.settings.temperament,
     (v) => Tuner.setSetting("temperament", v));
 
-  // Reference A: 392–466 in 0.5 Hz steps.
-  const stepA = (d) => {
-    const next = Math.min(466, Math.max(392, Math.round((Tuner.settings.refA + d) * 2) / 2));
-    Tuner.setSetting("refA", next);
-    syncControls();
+  // The figure picker, duplicated onto the main screen from the dev panel — see the note in
+  // index.html. buildSegmented's click handler calls syncControls(), which paints BOTH copies, so
+  // moving either one moves the other.
+  buildSegmented(el("figuremode"), Tuner.PARAMS.figureMode.choices,
+    () => Tuner.params.figureMode,
+    (v) => { Tuner.setParam("figureMode", v); syncHash(); });
+
+  // Reference A: 392–466 Hz, held to 0.1 Hz. The arrows nudge by 0.5; the FIELD is what makes A415
+  // reachable, so typed values keep a finer grain than the arrows step in.
+  const refA = el("refa-value");
+  const setA = (hz) => {
+    if (!Number.isFinite(hz)) return;
+    Tuner.setSetting("refA", Math.min(466, Math.max(392, Math.round(hz * 10) / 10)));
   };
+  const stepA = (d) => { setA(Tuner.settings.refA + d); syncControls(); };
   el("refa-down").onclick = () => stepA(-0.5);
   el("refa-up").onclick = () => stepA(0.5);
+  // Commit on blur/Enter, NOT on input: "41" on the way to "415" is a finite number that clamps to
+  // 392, which would rewrite the field and eat the next keystroke. syncControls() afterwards
+  // re-renders whatever actually stuck, so garbage simply snaps back to the current value.
+  const commitA = () => {
+    setA(parseFloat(refA.value));
+    // Written explicitly rather than left to syncControls: during a blur handler activeElement is
+    // still this field in some browsers, and syncControls skips a focused field on purpose.
+    refA.value = Tuner.settings.refA.toFixed(1);
+    syncControls();
+  };
+  refA.addEventListener("change", commitA);
+  refA.addEventListener("blur", commitA);
+  refA.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commitA(); refA.blur(); }
+  });
+  refA.addEventListener("focus", () => refA.select());
 
   el("theme").onclick = () => Theme.cycle();
   el("start").onclick = onStart;
@@ -841,13 +883,18 @@ function buildDevPanel() {
   applyHash();
 }
 
-// The pressed state of one enum row. buildSegmented's own set() calls syncControls(), which only
-// knows about the two controls in the bar — so the panel paints its own.
+// The pressed state of an enum control, by KEY rather than by node — figureMode has two controls
+// (the main-screen picker and the generated dev row) and neither may go stale while the other
+// moves. Nodes that do not exist yet are skipped: this runs at boot before the panel is built, and
+// the panel never exists at all outside dev mode.
+const CHOICE_NODES = { figureMode: ["p-figureMode", "figuremode"] };
 function paintChoice(key) {
-  const node = el("p-" + key);
-  if (!node) return;
   const current = String(Tuner.params[key]);
-  for (const b of node.children) b.setAttribute("aria-checked", String(b.dataset.value === current));
+  for (const id of CHOICE_NODES[key] || ["p-" + key]) {
+    const node = el(id);
+    if (!node) continue;
+    for (const b of node.children) b.setAttribute("aria-checked", String(b.dataset.value === current));
+  }
 }
 
 function paintDevStats() {
