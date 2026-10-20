@@ -6,12 +6,12 @@
 //
 //   node scripts/browser-check.mjs [baseUrl]
 import { chromium } from "playwright-core";
+import { CHROME_ARGS, stubAnalytics } from "./browser-env.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8137/";
-const browser = await chromium.launch({
-  args: ["--autoplay-policy=no-user-gesture-required", "--mute-audio"],
-});
+const browser = await chromium.launch({ args: CHROME_ARGS });
 const page = await browser.newPage({ viewport: { width: 430, height: 932 } });   // iPhone-ish
+await stubAnalytics(page);
 
 const errors = [];
 page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });

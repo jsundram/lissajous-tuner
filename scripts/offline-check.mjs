@@ -4,9 +4,10 @@
 // Loads once online to prime the service worker, kills the network, reloads, and confirms the app
 // still boots AND that the worklet (fetched by addModule long after boot) still loads.
 import { chromium } from "playwright-core";
+import { CHROME_ARGS } from "./browser-env.mjs";
 
 const BASE = process.argv[2] || "https://jsundram.github.io/lissajous-tuner/";
-const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gesture-required", "--mute-audio"] });
+const browser = await chromium.launch({ args: CHROME_ARGS });
 const ctx = await browser.newContext({ viewport: { width: 430, height: 932 } });
 const page = await ctx.newPage();
 const errors = [];
