@@ -5,6 +5,8 @@
 // errors. Uses ?test=1 so no microphone is involved.
 //
 //   node scripts/browser-check.mjs [baseUrl]
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { CHROME_ARGS, stubAnalytics } from "./browser-env.mjs";
 
@@ -60,7 +62,8 @@ const result = await page.evaluate(async () => {
   };
 });
 
-await page.screenshot({ path: process.env.SHOT || "/tmp/tuner.png" });
+// tmpdir() honours $TMPDIR; a hardcoded /tmp is not writable inside the sandbox.
+await page.screenshot({ path: process.env.SHOT || join(tmpdir(), "tuner.png") });
 await browser.close();
 
 console.log(JSON.stringify(result, null, 2));
