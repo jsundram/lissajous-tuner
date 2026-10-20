@@ -8,7 +8,7 @@
 //   x = cos t + w cos(2t + phi)      y = sin t + w sin(2t + phi)
 //
 // Usage: node scripts/make-figure.mjs [variant]        (default: ship)
-//        FIGURE_OUT=/tmp/x.svg node scripts/make-figure.mjs open
+//        FIGURE_OUT="$TMPDIR/x.svg" node scripts/make-figure.mjs open
 import { writeFileSync } from "node:fs";
 
 const W = 0.4;            // overtone mix weight — the app's VIZ default

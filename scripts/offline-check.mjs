@@ -3,13 +3,18 @@
 // wrong, because a missing precache entry breaks the app in a way that looks like a DSP bug.
 // Loads once online to prime the service worker, kills the network, reloads, and confirms the app
 // still boots AND that the worklet (fetched by addModule long after boot) still loads.
-import { chromium } from "playwright-core";
-import { CHROME_ARGS } from "./browser-env.mjs";
+//
+//   node scripts/offline-check.mjs [baseUrl]        (default: the deployed site)
+import { openPage, sandboxedMac } from "./browser-env.mjs";
 
 const BASE = process.argv[2] || "https://jsundram.github.io/lissajous-tuner/";
-const browser = await chromium.launch({ args: CHROME_ARGS });
-const ctx = await browser.newContext({ viewport: { width: 430, height: 932 } });
-const page = await ctx.newPage();
+// Sandboxed Chrome ignores the sandbox's proxy, so it cannot reach the deployed site at all.
+if (sandboxedMac && !/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(BASE)) {
+  console.error(`Inside Claude Code's sandbox the browser cannot reach ${BASE}.\n` +
+    "Run `npm run serve`, then: node scripts/offline-check.mjs http://127.0.0.1:8137/");
+  process.exit(1);
+}
+const { browser, ctx, page } = await openPage("chromium", { viewport: { width: 430, height: 932 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
 

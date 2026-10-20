@@ -53,8 +53,8 @@ npm run shot -- --theme light # screenshot the running app (see scripts/shot.mjs
 ```
 
 The DSP suite needs nothing installed. The two `check:` scripts drive a real browser, so they need
-`npm install` (a `playwright-core` devDependency; the browsers themselves come from
-`npx playwright install chromium`). Nothing in `node_modules` is ever deployed.
+`npm install` (a `playwright-core` devDependency; the browser itself comes from
+`npx playwright-core install chromium-headless-shell`). Nothing in `node_modules` is ever deployed.
 
 **Deploy with `npm run deploy -- "message"`,** never by hand — it verifies, then bumps the
 service-worker cache generation and restamps the build id in one commit. Skipping it ships a fix

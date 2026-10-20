@@ -9,13 +9,12 @@
 //   npm run serve                                    # in another shell
 //   node scripts/shot.mjs                            # default: 390x844 dark, +20 cents
 //   node scripts/shot.mjs --theme light --cents 3.93
-//   node scripts/shot.mjs --w 375 --h 667 --instrument cello --dev --out /tmp/x.png
+//   node scripts/shot.mjs --w 375 --h 667 --instrument cello --dev --out "$TMPDIR/x.png"
 //   node scripts/shot.mjs --url https://jsundram.github.io/lissajous-tuner/
 //   node scripts/shot.mjs --engine webkit           # closest thing to iOS Safari
 //
 // Exits non-zero on any page error, so a broken build can't quietly produce a pretty picture.
-import * as pw from "playwright-core";
-import { CHROME_ARGS, stubAnalytics } from "./browser-env.mjs";
+import { openPage } from "./browser-env.mjs";
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf("--" + name);
@@ -34,17 +33,15 @@ const opts = {
   engine: arg("engine", "chromium"),
 };
 
-const engine = pw[opts.engine];
-if (!engine) { console.error(`unknown --engine ${opts.engine} (chromium | webkit)`); process.exit(1); }
+if (!["chromium", "webkit"].includes(opts.engine)) {
+  console.error(`unknown --engine ${opts.engine} (chromium | webkit)`); process.exit(1);
+}
 
-const launchArgs = opts.engine === "chromium" ? CHROME_ARGS : [];
-const browser = await engine.launch({ args: launchArgs });
-const page = await browser.newPage({
+const { browser, page } = await openPage(opts.engine, {
   viewport: { width: opts.w, height: opts.h },
   colorScheme: opts.theme === "light" ? "light" : "dark",
   isMobile: true, hasTouch: true, deviceScaleFactor: 2,
 });
-await stubAnalytics(page);
 
 const errors = [];
 page.on("pageerror", (e) => errors.push("pageerror: " + e.message));

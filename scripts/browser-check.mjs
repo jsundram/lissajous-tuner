@@ -7,13 +7,10 @@
 //   node scripts/browser-check.mjs [baseUrl]
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright-core";
-import { CHROME_ARGS, stubAnalytics } from "./browser-env.mjs";
+import { openPage } from "./browser-env.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8137/";
-const browser = await chromium.launch({ args: CHROME_ARGS });
-const page = await browser.newPage({ viewport: { width: 430, height: 932 } });   // iPhone-ish
-await stubAnalytics(page);
+const { browser, page } = await openPage("chromium", { viewport: { width: 430, height: 932 } });   // iPhone-ish
 
 const errors = [];
 page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
@@ -62,11 +59,14 @@ const result = await page.evaluate(async () => {
   };
 });
 
-// tmpdir() honours $TMPDIR; a hardcoded /tmp is not writable inside the sandbox.
-await page.screenshot({ path: process.env.SHOT || join(tmpdir(), "tuner.png") });
+// tmpdir() honours $TMPDIR; a hardcoded /tmp is not writable inside the sandbox. It is also not a
+// predictable place, hence the path is printed.
+const shot = process.env.SHOT || join(tmpdir(), "tuner.png");
+await page.screenshot({ path: shot });
 await browser.close();
 
 console.log(JSON.stringify(result, null, 2));
+console.log("screenshot: " + shot);
 if (errors.length) { console.error("\nERRORS:\n" + errors.join("\n")); process.exit(1); }
 
 const fail = [];
