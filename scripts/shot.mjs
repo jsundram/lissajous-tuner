@@ -15,6 +15,7 @@
 //
 // Exits non-zero on any page error, so a broken build can't quietly produce a pretty picture.
 import * as pw from "playwright-core";
+import { CHROME_ARGS, stubAnalytics } from "./browser-env.mjs";
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf("--" + name);
@@ -36,14 +37,14 @@ const opts = {
 const engine = pw[opts.engine];
 if (!engine) { console.error(`unknown --engine ${opts.engine} (chromium | webkit)`); process.exit(1); }
 
-const launchArgs = opts.engine === "chromium"
-  ? ["--autoplay-policy=no-user-gesture-required", "--mute-audio"] : [];
+const launchArgs = opts.engine === "chromium" ? CHROME_ARGS : [];
 const browser = await engine.launch({ args: launchArgs });
 const page = await browser.newPage({
   viewport: { width: opts.w, height: opts.h },
   colorScheme: opts.theme === "light" ? "light" : "dark",
   isMobile: true, hasTouch: true, deviceScaleFactor: 2,
 });
+await stubAnalytics(page);
 
 const errors = [];
 page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
